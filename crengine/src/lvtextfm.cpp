@@ -4997,9 +4997,10 @@ public:
         hasBox = false;
     }
 
-    void buildOptimalItems(bool includeHyphenation,
+    void buildOptimalItems(bool includeHyphenation, bool includeDeprecatedWraps,
             const std::vector<int> & hyphenWidths, int fillStretch,
             std::vector<KPItem> & items) {
+        const int deprecatedPenalty = 5000;
         items.clear();
         items.reserve(m_length * 2 + 3);
         bool hasBox = false;
@@ -5020,13 +5021,23 @@ public:
                 int runEnd = i + 1;
                 while ( runEnd < m_length && (m_flags[runEnd] & LCHAR_IS_SPACE) )
                     runEnd++;
-                int breakPos = -1;
+                int normalBreakPos = -1;
+                int deprecatedBreakPos = -1;
                 for ( int j=i; j<runEnd; j++ ) {
-                    if ( j < m_length-1 &&
-                            (m_flags[j] & LCHAR_ALLOW_WRAP_AFTER) &&
-                            !(m_flags[j] & LCHAR_DEPRECATED_WRAP_AFTER) ) {
-                        breakPos = j;
+                    if ( j >= m_length-1 ||
+                            !(m_flags[j] & LCHAR_ALLOW_WRAP_AFTER) ) {
+                        continue;
                     }
+                    if ( m_flags[j] & LCHAR_DEPRECATED_WRAP_AFTER )
+                        deprecatedBreakPos = j;
+                    else
+                        normalBreakPos = j;
+                }
+                int breakPos = normalBreakPos;
+                bool deprecatedBreak = false;
+                if ( breakPos < 0 && includeDeprecatedWraps ) {
+                    breakPos = deprecatedBreakPos;
+                    deprecatedBreak = breakPos >= 0;
                 }
                 if ( breakPos >= 0 ) {
                     if ( i > boxStart ) {
@@ -5043,7 +5054,8 @@ public:
                     if ( preformatted ) {
                         addOptimalBox(items, i, breakPos+1);
                         hasBox = true;
-                        KPItem penalty = { KPItem::PENALTY, 0, 0, 0, 0,
+                        KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
+                                           deprecatedBreak ? deprecatedPenalty : 0,
                                            false, breakPos };
                         items.push_back(penalty);
                     }
@@ -5064,6 +5076,11 @@ public:
                         KPItem glue = { KPItem::GLUE, width,
                                         locked ? 0 : width * 3 / 2, shrink, 0,
                                         false, breakPos };
+                        if ( deprecatedBreak && hasBox ) {
+                            KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
+                                               deprecatedPenalty, false, breakPos };
+                            items.push_back(penalty);
+                        }
                         items.push_back(glue);
                     }
                     boxStart = breakPos + 1;
@@ -5087,9 +5104,10 @@ public:
                 continue;
             }
 
+            bool deprecatedBreak = m_flags[i] & LCHAR_DEPRECATED_WRAP_AFTER;
             if ( i < m_length-1 &&
                     (m_flags[i] & LCHAR_ALLOW_WRAP_AFTER) &&
-                    !(m_flags[i] & LCHAR_DEPRECATED_WRAP_AFTER) ) {
+                    (!deprecatedBreak || includeDeprecatedWraps) ) {
                 bool explicitHyphen = m_text[i] == '-' ||
                                       m_text[i] == UNICODE_HYPHEN;
                 bool duplicatesHyphen = false;
@@ -5101,7 +5119,8 @@ public:
                     addOptimalBox(items, boxStart, i+1);
                     hasBox = true;
                     KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
-                                       explicitHyphen ? 50 : 0,
+                                       deprecatedBreak ? deprecatedPenalty :
+                                           explicitHyphen ? 50 : 0,
                                        explicitHyphen, i };
                     items.push_back(penalty);
                     boxStart = i + 1;
@@ -5183,13 +5202,14 @@ public:
         }
     }
 
-    bool runOptimalBreakPass(bool includeHyphenation,
+    bool runOptimalBreakPass(bool includeHyphenation, bool includeDeprecatedWraps,
             const std::vector<int> & hyphenWidths, int firstWidth,
             int restWidth, int tolerance, int emergencyStretch,
             std::vector<int> & breaks) {
         std::vector<KPItem> items;
         int fillStretch = firstWidth > restWidth ? firstWidth : restWidth;
-        buildOptimalItems(includeHyphenation, hyphenWidths, fillStretch, items);
+        buildOptimalItems(includeHyphenation, includeDeprecatedWraps,
+                          hyphenWidths, fillStretch, items);
         std::vector<KPLine> lines(m_length + 1);
         KPParams params;
         params.tolerance = tolerance;
@@ -5238,18 +5258,18 @@ public:
 
         clearOptimalHyphenationFlags();
         std::vector<int> hyphenWidths(m_length, 0);
-        if ( runOptimalBreakPass(false, hyphenWidths, firstWidth, restWidth,
+        if ( runOptimalBreakPass(false, false, hyphenWidths, firstWidth, restWidth,
                                  100, 0, breaks) ) {
             return true;
         }
 
         hyphenateOptimalCandidates(hyphenWidths);
-        bool found = runOptimalBreakPass(true, hyphenWidths, firstWidth,
+        bool found = runOptimalBreakPass(true, false, hyphenWidths, firstWidth,
                                          restWidth, 200, 0, breaks);
         if ( !found && m_pbuffer->strut_height > 0 ) {
             // simplification: strut height approximates 1 em; use the block
             // font size here if exact CSS ems become necessary.
-            found = runOptimalBreakPass(true, hyphenWidths, firstWidth,
+            found = runOptimalBreakPass(true, true, hyphenWidths, firstWidth,
                     restWidth, 200, 3 * m_pbuffer->strut_height, breaks);
         }
         if ( !found ) {
