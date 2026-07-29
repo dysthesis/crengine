@@ -1,9 +1,14 @@
 #include "../crengine/include/lvkplinebreak.h"
 
+// The self-check's assertions must survive release build flags.
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <string>
@@ -164,7 +169,8 @@ std::int64_t scoreBreaks(const std::vector<KPItem> & items,
                          const KPParams & params)
 {
     std::int64_t score;
-    assert(calculateScore(items, breaks, first_width, rest_width, params, score));
+    if (!calculateScore(items, breaks, first_width, rest_width, params, score))
+        std::abort();
     return score;
 }
 
@@ -347,10 +353,10 @@ void checkExhaustiveOptimality()
                                             for (int i = 0; i < count; i++)
                                                 actual.push_back(lines[i].break_item);
                                             std::int64_t actual_score;
-                                            assert(calculateScore(items, actual, first_width,
-                                                                  rest_width, params,
-                                                                  actual_score));
-                                            assert(actual_score == optimum);
+                                            if (!calculateScore(items, actual, first_width,
+                                                                rest_width, params, actual_score)
+                                                    || actual_score != optimum)
+                                                std::abort();
                                         }
                                     }
                                 }
