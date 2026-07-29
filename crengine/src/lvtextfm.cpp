@@ -5185,13 +5185,15 @@ public:
 
     bool runOptimalBreakPass(bool includeHyphenation,
             const std::vector<int> & hyphenWidths, int firstWidth,
-            int restWidth, int tolerance, std::vector<int> & breaks) {
+            int restWidth, int tolerance, int emergencyStretch,
+            std::vector<int> & breaks) {
         std::vector<KPItem> items;
         int fillStretch = firstWidth > restWidth ? firstWidth : restWidth;
         buildOptimalItems(includeHyphenation, hyphenWidths, fillStretch, items);
         std::vector<KPLine> lines(m_length + 1);
         KPParams params;
         params.tolerance = tolerance;
+        params.emergency_stretch = emergencyStretch;
         int lineCount = kp_break_paragraph(&items[0], (int)items.size(),
                 firstWidth, restWidth, params, &lines[0], (int)lines.size());
         if ( lineCount <= 0 )
@@ -5237,13 +5239,20 @@ public:
         clearOptimalHyphenationFlags();
         std::vector<int> hyphenWidths(m_length, 0);
         if ( runOptimalBreakPass(false, hyphenWidths, firstWidth, restWidth,
-                                 100, breaks) ) {
+                                 100, 0, breaks) ) {
             return true;
         }
 
         hyphenateOptimalCandidates(hyphenWidths);
-        if ( !runOptimalBreakPass(true, hyphenWidths, firstWidth, restWidth,
-                                  200, breaks) ) {
+        bool found = runOptimalBreakPass(true, hyphenWidths, firstWidth,
+                                         restWidth, 200, 0, breaks);
+        if ( !found && m_pbuffer->strut_height > 0 ) {
+            // simplification: strut height approximates 1 em; use the block
+            // font size here if exact CSS ems become necessary.
+            found = runOptimalBreakPass(true, hyphenWidths, firstWidth,
+                    restWidth, 200, 3 * m_pbuffer->strut_height, breaks);
+        }
+        if ( !found ) {
             clearOptimalHyphenationFlags();
             return false;
         }
