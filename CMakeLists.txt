@@ -47,6 +47,7 @@ set(CRE_SRCS
     crengine/src/lvstring.cpp
     crengine/src/lvstsheet.cpp
     crengine/src/lvstyles.cpp
+    crengine/src/lvkplinebreak.cpp
     crengine/src/lvtextfm.cpp
     crengine/src/lvtinydom.cpp
     crengine/src/lvxml.cpp
