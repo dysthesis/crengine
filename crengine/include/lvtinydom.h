@@ -112,6 +112,7 @@ extern const int gDOMVersionCurrent;
 #define DOC_PROP_CODE_BASE       "doc.file.code.base"
 #define DOC_PROP_COVER_FILE      "doc.cover.file"
 
+#define DEF_OPTIMAL_LINE_BREAKING false
 #define DEF_SPACE_WIDTH_SCALE_PERCENT 100
 #define DEF_MIN_SPACE_CONDENSING_PERCENT 50
 #define DEF_UNUSED_SPACE_THRESHOLD_PERCENT 5
@@ -557,6 +558,7 @@ protected:
     int  _mapSavingStage;
 
     img_scaling_options_t _imgScalingOptions;
+    bool _optimalLineBreaking;
     int  _spaceWidthScalePercent;
     int  _minSpaceCondensingPercent;
     int  _unusedSpaceThresholdPercent;
@@ -631,6 +633,17 @@ protected:
 public:
 
 #if BUILD_LITE!=1
+    bool getOptimalLineBreaking() const {
+        return _optimalLineBreaking;
+    }
+
+    bool setOptimalLineBreaking(bool optimalLineBreaking) {
+        if (optimalLineBreaking == _optimalLineBreaking)
+            return false;
+        _optimalLineBreaking = optimalLineBreaking;
+        return true;
+    }
+
     int getSpaceWidthScalePercent() {
         return _spaceWidthScalePercent;
     }

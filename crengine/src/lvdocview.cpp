@@ -4962,6 +4962,7 @@ void LVDocView::createEmptyDocument() {
             PROP_EMBEDDED_FONTS, true));
     m_doc->setDocFlag(DOC_FLAG_NONLINEAR_PAGEBREAK, m_props->getBoolDef(
             PROP_NONLINEAR_PAGEBREAK, false));
+    m_doc->setOptimalLineBreaking(m_props->getBoolDef(PROP_FORMAT_OPTIMAL_LINE_BREAKING, DEF_OPTIMAL_LINE_BREAKING));
     m_doc->setSpaceWidthScalePercent(m_props->getIntDef(PROP_FORMAT_SPACE_WIDTH_SCALE_PERCENT, DEF_SPACE_WIDTH_SCALE_PERCENT));
     m_doc->setMinSpaceCondensingPercent(m_props->getIntDef(PROP_FORMAT_MIN_SPACE_CONDENSING_PERCENT, DEF_MIN_SPACE_CONDENSING_PERCENT));
     m_doc->setUnusedSpaceThresholdPercent(m_props->getIntDef(PROP_FORMAT_UNUSED_SPACE_THRESHOLD_PERCENT, DEF_UNUSED_SPACE_THRESHOLD_PERCENT));
@@ -6778,6 +6779,8 @@ void LVDocView::propsUpdateDefaults(CRPropRef props) {
     props->setIntDef(PROP_IMG_SCALING_ZOOMIN_BLOCK_MODE, defImgScaling.mode);
     props->setIntDef(PROP_IMG_SCALING_ZOOMIN_INLINE_MODE, defImgScaling.mode);
 
+    props->setIntDef(PROP_FORMAT_OPTIMAL_LINE_BREAKING, DEF_OPTIMAL_LINE_BREAKING);
+
     int p = props->getIntDef(PROP_FORMAT_SPACE_WIDTH_SCALE_PERCENT, DEF_SPACE_WIDTH_SCALE_PERCENT);
     if (p<10)
         p = 10;
@@ -7176,6 +7179,11 @@ CRPropRef LVDocView::propsApply(CRPropRef props) {
                 gRenderScaleFontWithDPI = value;
                 REQUEST_RENDER("propsApply render scale font with dpi")
             }
+        } else if (name == PROP_FORMAT_OPTIMAL_LINE_BREAKING) {
+            bool value = props->getBoolDef(PROP_FORMAT_OPTIMAL_LINE_BREAKING, DEF_OPTIMAL_LINE_BREAKING);
+            if (m_doc) // not when noDefaultDocument=true
+                if (getDocument()->setOptimalLineBreaking(value))
+                    REQUEST_RENDER("propsApply optimal line breaking")
         } else if (name == PROP_FORMAT_SPACE_WIDTH_SCALE_PERCENT) {
             int value = props->getIntDef(PROP_FORMAT_SPACE_WIDTH_SCALE_PERCENT, DEF_SPACE_WIDTH_SCALE_PERCENT);
             if (m_doc) // not when noDefaultDocument=true

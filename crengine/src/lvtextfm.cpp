@@ -167,6 +167,7 @@ formatted_text_fragment_t * lvtextAllocFormatter( lUInt16 width )
     pbuffer->strut_baseline = 0;
     pbuffer->is_reusable = true;
     pbuffer->light_formatting = false;
+    pbuffer->optimal_line_breaking = false;
     int defMode = MAX_IMAGE_SCALE_MUL > 1 ? (ARBITRARY_IMAGE_SCALE_ENABLED==1 ? 2 : 1) : 0;
     int defMult = MAX_IMAGE_SCALE_MUL;
     // mode: 0=disabled, 1=integer scaling factors, 2=free scaling
@@ -5345,7 +5346,8 @@ public:
         }
 
         std::vector<int> optimalBreaks;
-        if ( canUseOptimalLineBreaking(start, end, para, preFormattedOnly) &&
+        if ( m_pbuffer->optimal_line_breaking &&
+                canUseOptimalLineBreaking(start, end, para, preFormattedOnly) &&
                 findOptimalBreaks(para, optimalBreaks) ) {
             addOptimalLines(optimalBreaks, para, preFormattedOnly, isLastPara);
             return;
@@ -6397,6 +6399,11 @@ void LFormattedText::setImageScalingOptions( img_scaling_options_t * options )
     m_pbuffer->img_zoom_out_scale_block = options->zoom_out_block.max_scale;
     m_pbuffer->img_zoom_out_mode_inline = options->zoom_out_inline.mode;
     m_pbuffer->img_zoom_out_scale_inline = options->zoom_out_inline.max_scale;
+}
+
+void LFormattedText::setOptimalLineBreaking(bool enabled)
+{
+    m_pbuffer->optimal_line_breaking = enabled;
 }
 
 void LFormattedText::setSpaceWidthScalePercent(int spaceWidthScalePercent)

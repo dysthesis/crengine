@@ -310,6 +310,8 @@ typedef struct
    lInt32                img_zoom_out_mode_inline; /**< can zoom out inline images: 0=disabled, 1=integer scale, 2=free scale */
    lInt32                img_zoom_out_scale_inline; /**< max scale for inline images zoom out: 1, 2, 3 */
 
+   bool                  optimal_line_breaking; /**< use optimal paragraph line breaking when eligible */
+
    // Space width
    lInt32                space_width_scale_percent; /**< scale the normal width of all spaces in all fonts by this percent */
    lInt32                min_space_condensing_percent; /**< min size of space (relative to scaled size) to allow fitting line by reducing of spaces */
@@ -415,6 +417,9 @@ public:
 
     /// set image scaling options
     void setImageScalingOptions( img_scaling_options_t * options );
+
+    /// enable optimal paragraph line breaking
+    void setOptimalLineBreaking(bool enabled);
 
     /// set space glyph width scaling percent option (10..500%)
     // (scale the normal width of all spaces in all fonts by this percent)
