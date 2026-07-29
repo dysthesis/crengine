@@ -16,8 +16,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <vector>
 #include "../include/lvfnt.h"
 #include "../include/lvtextfm.h"
+#include "../include/lvkplinebreak.h"
 #include "../include/lvdrawbuf.h"
 #include "../include/fb2def.h"
 
@@ -4936,6 +4938,377 @@ public:
 
     }
 
+    bool canUseOptimalLineBreaking(int start, int end, src_text_fragment_t * para,
+            bool preFormattedOnly) {
+        if ( m_length <= 0 || preFormattedOnly || m_has_cjk || m_has_float_to_position ||
+                m_has_ongoing_float || m_initial_letter_exclusion.active ||
+                (para->flags & LTEXT_FLAG_NEWLINE) != LTEXT_ALIGN_WIDTH ||
+                getCurrentLineWidth() != m_pbuffer->width ) {
+            return false;
+        }
+
+        bool allPreformatted = true;
+        for ( int i=start; i<end; i++ ) {
+            src_text_fragment_t * src = &m_pbuffer->srctext[i];
+            if ( !(src->flags & LTEXT_FLAG_PREFORMATTED) )
+                allPreformatted = false;
+            if ( src->flags & LTEXT_IS_FIRST_LINE_CLONE )
+                return false;
+            if ( src->flags & LTEXT_SRC_IS_OBJECT ) {
+                if ( src->o.objflags & LTEXT_OBJECT_IS_FLOAT )
+                    return false;
+                if ( src->o.objflags & LTEXT_OBJECT_IS_INLINE_BOX ) {
+                    ldomNode * node = (ldomNode *)src->object;
+                    if ( node && getInitialLetterInlineBoxPseudoElem(node) )
+                        return false;
+                }
+            }
+        }
+        return !allPreformatted;
+    }
+
+    int getOptimalRangeWidth(int start, int end) {
+        if ( end <= start )
+            return 0;
+        return m_widths[end-1] - (start > 0 ? m_widths[start-1] : 0);
+    }
+
+    void addOptimalBox(std::vector<KPItem> & items, int start, int end) {
+        if ( end <= start )
+            return;
+        KPItem box = { KPItem::BOX, getOptimalRangeWidth(start, end), 0, 0,
+                       0, false, end-1 };
+        items.push_back(box);
+    }
+
+    void addOptimalRaggedBreak(std::vector<KPItem> & items, int pos,
+            int fillStretch, bool & hasBox) {
+        if ( !hasBox ) {
+            KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false, pos };
+            items.push_back(empty);
+        }
+        KPItem blocker = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, pos };
+        KPItem fill = { KPItem::GLUE, 0, fillStretch, 0, 0, false, pos };
+        KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, pos };
+        items.push_back(blocker);
+        items.push_back(fill);
+        items.push_back(forced);
+        hasBox = false;
+    }
+
+    void buildOptimalItems(bool includeHyphenation,
+            const std::vector<int> & hyphenWidths, int fillStretch,
+            std::vector<KPItem> & items) {
+        items.clear();
+        items.reserve(m_length * 2 + 3);
+        bool hasBox = false;
+        int boxStart = 0;
+        int i = 0;
+        while ( i < m_length ) {
+            if ( m_text[i] == '\n' ) {
+                if ( i > boxStart ) {
+                    addOptimalBox(items, boxStart, i);
+                    hasBox = true;
+                }
+                addOptimalRaggedBreak(items, i, fillStretch, hasBox);
+                boxStart = ++i;
+                continue;
+            }
+
+            if ( m_flags[i] & LCHAR_IS_SPACE ) {
+                int runEnd = i + 1;
+                while ( runEnd < m_length && (m_flags[runEnd] & LCHAR_IS_SPACE) )
+                    runEnd++;
+                int breakPos = -1;
+                for ( int j=i; j<runEnd; j++ ) {
+                    if ( j < m_length-1 &&
+                            (m_flags[j] & LCHAR_ALLOW_WRAP_AFTER) &&
+                            !(m_flags[j] & LCHAR_DEPRECATED_WRAP_AFTER) ) {
+                        breakPos = j;
+                    }
+                }
+                if ( breakPos >= 0 ) {
+                    if ( i > boxStart ) {
+                        addOptimalBox(items, boxStart, i);
+                        hasBox = true;
+                    }
+                    bool preformatted = false;
+                    bool locked = false;
+                    for ( int j=i; j<=breakPos; j++ ) {
+                        preformatted = preformatted ||
+                                (m_srcs[j]->flags & LTEXT_FLAG_PREFORMATTED);
+                        locked = locked || (m_flags[j] & LCHAR_LOCKED_SPACING);
+                    }
+                    if ( preformatted ) {
+                        addOptimalBox(items, i, breakPos+1);
+                        hasBox = true;
+                        KPItem penalty = { KPItem::PENALTY, 0, 0, 0, 0,
+                                           false, breakPos };
+                        items.push_back(penalty);
+                    }
+                    else {
+                        if ( hasBox && items.back().type != KPItem::BOX ) {
+                            KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false,
+                                             breakPos };
+                            items.push_back(empty);
+                        }
+                        int width = getOptimalRangeWidth(i, breakPos+1);
+                        int shrink = 0;
+                        if ( !locked &&
+                                m_pbuffer->min_space_condensing_percent != 100 &&
+                                breakPos < m_length-1 &&
+                                !(m_flags[breakPos+1] & LCHAR_IS_SPACE) ) {
+                            shrink = getMaxCondensedSpaceTruncation(breakPos);
+                        }
+                        KPItem glue = { KPItem::GLUE, width,
+                                        locked ? 0 : width * 3 / 2, shrink, 0,
+                                        false, breakPos };
+                        items.push_back(glue);
+                    }
+                    boxStart = breakPos + 1;
+                    i = boxStart;
+                    continue;
+                }
+                i = runEnd;
+                continue;
+            }
+
+            if ( includeHyphenation &&
+                    (m_flags[i] & LCHAR_ALLOW_HYPH_WRAP_AFTER) &&
+                    i < m_length-1 &&
+                    !(m_flags[i+1] & LCHAR_IS_CLUSTER_TAIL) ) {
+                addOptimalBox(items, boxStart, i+1);
+                hasBox = true;
+                KPItem penalty = { KPItem::PENALTY, hyphenWidths[i], 0, 0,
+                                   50, true, i };
+                items.push_back(penalty);
+                boxStart = ++i;
+                continue;
+            }
+
+            if ( i < m_length-1 &&
+                    (m_flags[i] & LCHAR_ALLOW_WRAP_AFTER) &&
+                    !(m_flags[i] & LCHAR_DEPRECATED_WRAP_AFTER) ) {
+                bool explicitHyphen = m_text[i] == '-' ||
+                                      m_text[i] == UNICODE_HYPHEN;
+                bool duplicatesHyphen = false;
+                #if (USE_LIBUNIBREAK==1)
+                if ( explicitHyphen && m_srcs[i]->lang_cfg )
+                    duplicatesHyphen = m_srcs[i]->lang_cfg->duplicateRealHyphenOnNextLine();
+                #endif
+                if ( !duplicatesHyphen ) {
+                    addOptimalBox(items, boxStart, i+1);
+                    hasBox = true;
+                    KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
+                                       explicitHyphen ? 50 : 0,
+                                       explicitHyphen, i };
+                    items.push_back(penalty);
+                    boxStart = i + 1;
+                }
+            }
+            i++;
+        }
+
+        if ( boxStart < m_length ) {
+            addOptimalBox(items, boxStart, m_length);
+            hasBox = true;
+        }
+        if ( items.empty() || items.back().type != KPItem::PENALTY ||
+                items.back().penalty > -KP_INFINITY ) {
+            addOptimalRaggedBreak(items, m_length-1, fillStretch, hasBox);
+        }
+    }
+
+    void clearOptimalHyphenationFlags() {
+        for ( int i=0; i<m_length; i++ )
+            m_flags[i] &= ~LCHAR_ALLOW_HYPH_WRAP_AFTER;
+    }
+
+    void hyphenateOptimalCandidates(std::vector<int> & hyphenWidths) {
+        hyphenWidths.assign(m_length, 0);
+        int wordpos = m_length - 1;
+        while ( wordpos >= 0 ) {
+            int wstart, wend;
+            bool hasRtl;
+            lStr_findWordBounds(m_text, m_length, wordpos,
+                                wstart, wend, hasRtl);
+            if ( wstart < 0 || wend <= wstart )
+                break;
+            int len = wend - wstart;
+            int sourcePos = wend - 1;
+            src_text_fragment_t * source = m_srcs[sourcePos];
+            if ( len < MIN_WORD_LEN_TO_HYPHENATE || hasRtl ||
+                    !source || (source->flags & LTEXT_SRC_IS_OBJECT) ||
+                    !(source->flags & LTEXT_HYPHENATE) ||
+                    (source->flags & LTEXT_FLAG_NOWRAP) || !source->lang_cfg ) {
+                wordpos = wstart - 1;
+                continue;
+            }
+            if ( len > MAX_WORD_SIZE )
+                len = MAX_WORD_SIZE;
+
+            lUInt16 widths[MAX_WORD_SIZE];
+            int wordStartWidth = wstart > 0 ? m_widths[wstart-1] : 0;
+            for ( int j=0; j<len; j++ )
+                widths[j] = m_widths[wstart+j] - wordStartWidth;
+
+            int hyphenWidth = 0;
+            for ( int j=wstart; j<wend; j++ ) {
+                if ( !(m_srcs[j]->flags & LTEXT_SRC_IS_OBJECT) ) {
+                    hyphenWidth = ((LVFont *)m_srcs[j]->t.font)->getHyphenWidth();
+                    break;
+                }
+            }
+            lUInt8 * flags = (lUInt8 *)(m_flags + wstart);
+            source->lang_cfg->getHyphMethod()->hyphenate(
+                    m_text+wstart, len, widths, flags, hyphenWidth, 0xFFFF, 2);
+            for ( int j=0; j<len; j++ ) {
+                int pos = wstart + j;
+                if ( !(m_flags[pos] & LCHAR_ALLOW_HYPH_WRAP_AFTER) )
+                    continue;
+                src_text_fragment_t * candidateSource = m_srcs[pos];
+                if ( pos >= m_length-1 ||
+                        (m_flags[pos+1] & LCHAR_IS_CLUSTER_TAIL) ||
+                        !candidateSource ||
+                        !(candidateSource->flags & LTEXT_HYPHENATE) ||
+                        (candidateSource->flags & LTEXT_FLAG_NOWRAP) ) {
+                    m_flags[pos] &= ~LCHAR_ALLOW_HYPH_WRAP_AFTER;
+                }
+                else {
+                    hyphenWidths[pos] = hyphenWidth;
+                }
+            }
+            wordpos = wstart - 1;
+        }
+    }
+
+    bool runOptimalBreakPass(bool includeHyphenation,
+            const std::vector<int> & hyphenWidths, int firstWidth,
+            int restWidth, int tolerance, std::vector<int> & breaks) {
+        std::vector<KPItem> items;
+        int fillStretch = firstWidth > restWidth ? firstWidth : restWidth;
+        buildOptimalItems(includeHyphenation, hyphenWidths, fillStretch, items);
+        std::vector<KPLine> lines(m_length + 1);
+        KPParams params;
+        params.tolerance = tolerance;
+        int lineCount = kp_break_paragraph(&items[0], (int)items.size(),
+                firstWidth, restWidth, params, &lines[0], (int)lines.size());
+        if ( lineCount <= 0 )
+            return false;
+
+        breaks.clear();
+        breaks.reserve(lineCount);
+        int previous = -1;
+        for ( int i=0; i<lineCount; i++ ) {
+            int itemIndex = lines[i].break_item;
+            if ( itemIndex < 0 || itemIndex >= (int)items.size() )
+                return false;
+            int breakPos = items[itemIndex].pos;
+            if ( breakPos <= previous || breakPos >= m_length )
+                return false;
+            breaks.push_back(breakPos);
+            previous = breakPos;
+        }
+        return !breaks.empty() && breaks.back() == m_length-1;
+    }
+
+    bool findOptimalBreaks(src_text_fragment_t * para,
+            std::vector<int> & breaks) {
+        int firstIndent;
+        int restIndent;
+        if ( para->flags & LTEXT_LEGACY_RENDERING ) {
+            firstIndent = para->indent > 0 ? para->indent : 0;
+            restIndent = para->indent > 0 ? 0 : -para->indent;
+        }
+        else if ( m_indent_first_line_done ) {
+            firstIndent = restIndent = m_indent_current;
+        }
+        else {
+            firstIndent = m_indent_current;
+            restIndent = m_indent_after_first_line;
+        }
+        int availableWidth = getCurrentLineWidth();
+        int firstWidth = availableWidth - firstIndent;
+        int restWidth = availableWidth - restIndent;
+        if ( firstWidth <= 0 || restWidth <= 0 )
+            return false;
+
+        clearOptimalHyphenationFlags();
+        std::vector<int> hyphenWidths(m_length, 0);
+        if ( runOptimalBreakPass(false, hyphenWidths, firstWidth, restWidth,
+                                 100, breaks) ) {
+            return true;
+        }
+
+        hyphenateOptimalCandidates(hyphenWidths);
+        if ( !runOptimalBreakPass(true, hyphenWidths, firstWidth, restWidth,
+                                  200, breaks) ) {
+            clearOptimalHyphenationFlags();
+            return false;
+        }
+
+        std::vector<int> chosenHyphens;
+        for ( std::vector<int>::const_iterator it=breaks.begin();
+                it!=breaks.end(); ++it ) {
+            if ( m_flags[*it] & LCHAR_ALLOW_HYPH_WRAP_AFTER )
+                chosenHyphens.push_back(*it);
+        }
+        clearOptimalHyphenationFlags();
+        for ( std::vector<int>::const_iterator it=chosenHyphens.begin();
+                it!=chosenHyphens.end(); ++it ) {
+            m_flags[*it] |= LCHAR_ALLOW_HYPH_WRAP_AFTER;
+        }
+        return true;
+    }
+
+    void addOptimalLines(const std::vector<int> & breaks,
+            src_text_fragment_t * para, bool preFormattedOnly,
+            bool isLastPara) {
+        int pos = 0;
+        for ( std::vector<int>::const_iterator it=breaks.begin();
+                it!=breaks.end(); ++it ) {
+            int wrapPos = *it;
+            int x;
+            if ( para->flags & LTEXT_LEGACY_RENDERING ) {
+                x = para->indent > 0 ? (pos == 0 ? para->indent : 0)
+                                     : (pos == 0 ? 0 : -para->indent);
+            }
+            else {
+                x = m_indent_current;
+                if ( !m_indent_first_line_done ) {
+                    m_indent_first_line_done = true;
+                    m_indent_current = m_indent_after_first_line;
+                }
+            }
+
+            int endp = wrapPos + (m_text[wrapPos] == '\n' ? 0 : 1);
+            if ( endp > m_length )
+                endp = m_length;
+            bool hasInlineBoxes = false;
+            for ( int i=pos; i<endp; i++ ) {
+                if ( (m_flags[i] & LCHAR_IS_OBJECT) &&
+                        m_charindex[i] == INLINEBOX_CHAR_INDEX ) {
+                    hasInlineBoxes = true;
+                    break;
+                }
+            }
+            addLine(pos, endp, x, para, pos == 0,
+                    wrapPos >= m_length-1, preFormattedOnly, isLastPara,
+                    hasInlineBoxes);
+            pos = wrapPos + 1;
+
+            #if (USE_LIBUNIBREAK==1)
+            if ( m_srcs[wrapPos]->lang_cfg->duplicateRealHyphenOnNextLine() &&
+                    pos > 0 && pos < m_length-1 &&
+                    (m_text[wrapPos] == '-' ||
+                     m_text[wrapPos] == UNICODE_HYPHEN) ) {
+                pos--;
+                m_flags[pos] &= ~LCHAR_ALLOW_WRAP_AFTER;
+            }
+            #endif
+        }
+    }
+
     /// Split paragraph into lines
     void processParagraph( int start, int end, bool isLastPara )
     {
@@ -4969,6 +5342,13 @@ public:
                 }
             }
             preFormattedOnly = preFormattedOnly && lfFound;
+        }
+
+        std::vector<int> optimalBreaks;
+        if ( canUseOptimalLineBreaking(start, end, para, preFormattedOnly) &&
+                findOptimalBreaks(para, optimalBreaks) ) {
+            addOptimalLines(optimalBreaks, para, preFormattedOnly, isLastPara);
+            return;
         }
 
         // Not per-specs, but when floats reduce the available width, skip y until
