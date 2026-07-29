@@ -163,6 +163,97 @@ bool calculateScore(const std::vector<KPItem> & items,
     return true;
 }
 
+bool isForcedBreak(const KPItem & item)
+{
+    return item.type == KPItem::PENALTY && item.penalty <= -KP_INFINITY;
+}
+
+bool minimumScore(const std::vector<KPItem> & items,
+                  int first_width, int rest_width,
+                  const KPParams & params, std::int64_t & minimum)
+{
+    int optional_count = 0;
+    for (int i = 0; i < static_cast<int>(items.size()); i++) {
+        if (legalBreak(items, i) && !isForcedBreak(items[i]))
+            optional_count++;
+    }
+    assert(optional_count < 63);
+
+    bool found = false;
+    const std::uint64_t combination_count =
+            static_cast<std::uint64_t>(1) << optional_count;
+    for (std::uint64_t mask = 0; mask < combination_count; mask++) {
+        std::vector<int> breaks;
+        int optional_index = 0;
+        for (int i = 0; i < static_cast<int>(items.size()); i++) {
+            if (!legalBreak(items, i))
+                continue;
+            if (isForcedBreak(items[i])
+                    || (mask & (static_cast<std::uint64_t>(1)
+                                << optional_index))) {
+                breaks.push_back(i);
+            }
+            if (!isForcedBreak(items[i]))
+                optional_index++;
+        }
+
+        std::int64_t score;
+        if (calculateScore(items, breaks, first_width, rest_width, params, score)
+                && (!found || score < minimum)) {
+            minimum = score;
+            found = true;
+        }
+    }
+    return found;
+}
+
+void assertOptimal(const std::vector<KPItem> & items,
+                   int first_width, int rest_width,
+                   const KPParams & params)
+{
+    std::int64_t minimum;
+    const bool feasible = minimumScore(items, first_width, rest_width,
+                                       params, minimum);
+    std::vector<KPLine> lines(items.size());
+    const int count = kp_break_paragraph(&items[0], items.size(),
+            first_width, rest_width, params, &lines[0], lines.size());
+    if (!feasible) {
+        assert(count == -1);
+        return;
+    }
+    assert(count > 0);
+
+    std::vector<int> actual;
+    for (int i = 0; i < count; i++)
+        actual.push_back(lines[i].break_item);
+    std::int64_t actual_score;
+    if (!calculateScore(items, actual, first_width, rest_width,
+                        params, actual_score)
+            || actual_score != minimum) {
+        std::abort();
+    }
+
+    int actual_index = 0;
+    for (int i = 0; i < static_cast<int>(items.size()); i++) {
+        if (!isForcedBreak(items[i]))
+            continue;
+        while (actual_index < count && actual[actual_index] < i)
+            actual_index++;
+        assert(actual_index < count && actual[actual_index] == i);
+    }
+}
+
+unsigned nextRandom(unsigned & state)
+{
+    state = state * 1664525U + 1013904223U;
+    return state;
+}
+
+int draw(unsigned & state, int limit)
+{
+    return static_cast<int>(nextRandom(state) % static_cast<unsigned>(limit));
+}
+
 std::int64_t scoreBreaks(const std::vector<KPItem> & items,
                          const std::vector<int> & breaks,
                          int first_width, int rest_width,
@@ -369,6 +460,57 @@ void checkExhaustiveOptimality()
     }
 }
 
+void checkGeneratedOptimality()
+{
+    static const int penalties[] = { -500, 0, 50, 5000 };
+    static const int tolerances[] = { 100, 200, KP_INFINITY };
+    unsigned state = 0x4b505f31U;
+
+    for (int test = 0; test < 5000; test++) {
+        std::vector<KPItem> items;
+        const int word_count = 1 + draw(state, 5);
+        for (int word = 0; word < word_count; word++) {
+            items.push_back(box(1 + draw(state, 12)));
+            if (word == word_count - 1)
+                continue;
+
+            switch (draw(state, 5)) {
+            case 0:
+                items.push_back(glue(1 + draw(state, 3),
+                                     1 + draw(state, 4), draw(state, 3)));
+                break;
+            case 1:
+                items.push_back(penalty(draw(state, 3),
+                        penalties[draw(state, 4)], draw(state, 2) != 0));
+                break;
+            case 2:
+                items.push_back(penalty(0, 5000));
+                items.push_back(glue(1 + draw(state, 3),
+                                     1 + draw(state, 4), draw(state, 3)));
+                break;
+            case 3:
+                items.push_back(penalty(0, 0));
+                break;
+            default:
+                items.push_back(penalty(0, KP_INFINITY));
+                items.push_back(glue(0, 100000, 0));
+                items.push_back(penalty(0, -KP_INFINITY));
+                break;
+            }
+        }
+        finishParagraph(items);
+
+        KPParams params;
+        params.tolerance = tolerances[draw(state, 3)];
+        params.line_penalty = draw(state, 21);
+        params.adj_demerits = draw(state, 3) == 0 ? 0 : 10000;
+        params.double_hyphen_demerits = draw(state, 3) == 0 ? 0 : 10000;
+        params.final_hyphen_demerits = draw(state, 3) == 0 ? 0 : 5000;
+        params.emergency_stretch = draw(state, 7);
+        assertOptimal(items, 3 + draw(state, 18), 3 + draw(state, 18), params);
+    }
+}
+
 void checkEdgeCases()
 {
     KPParams params;
@@ -437,6 +579,7 @@ int main()
     checkHandcraftedParagraph();
     checkPaperParagraph();
     checkExhaustiveOptimality();
+    checkGeneratedOptimality();
     checkEdgeCases();
     std::puts("kp_selfcheck: ok");
     return 0;
