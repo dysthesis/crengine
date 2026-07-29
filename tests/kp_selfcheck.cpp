@@ -400,6 +400,15 @@ void checkEdgeCases()
     assert(kp_break_paragraph(&single[0], single.size(), 10, 10,
                               params, lines, 8) == 1);
 
+    std::vector<KPItem> breakOnlyWidth;
+    breakOnlyWidth.push_back(box(4));
+    breakOnlyWidth.push_back(penalty(2, 0));
+    breakOnlyWidth.push_back(box(1));
+    finishParagraph(breakOnlyWidth);
+    count = kp_break_paragraph(&breakOnlyWidth[0], breakOnlyWidth.size(), 5, 5,
+                               params, lines, 8);
+    assert(count == 1 && lines[0].break_item == 5);
+
     std::vector<KPItem> unbreakable;
     unbreakable.push_back(box(20));
     finishParagraph(unbreakable);

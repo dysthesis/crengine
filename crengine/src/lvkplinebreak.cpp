@@ -285,7 +285,13 @@ int kp_break_paragraph(const KPItem * items, int n_items,
             int target = previous.line_count == 0 ? first_line_width : rest_width;
             LineFit fit = fitLine(natural, stretch, shrink, target,
                                   params.emergency_stretch);
-            if (!forced && !fit.overfull)
+            bool permanently_overfull = fit.overfull;
+            if (permanently_overfull && item.type == KPItem::PENALTY) {
+                // Break-only penalty width vanishes at later candidates.
+                permanently_overfull = natural - item.width >
+                        static_cast<std::int64_t>(target) + shrink;
+            }
+            if (!forced && !permanently_overfull)
                 surviving.push_back(previous_index);
             if (fit.overfull || fit.badness > params.tolerance)
                 continue;
