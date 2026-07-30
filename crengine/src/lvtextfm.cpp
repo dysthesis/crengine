@@ -416,6 +416,8 @@ public:
     struct OptimalLineDecision {
         int wrap_pos;
         int ratio_x1000;
+        int hang_left;
+        int hang_right;
         bool adjust_spacing;
     };
 
@@ -4512,8 +4514,10 @@ public:
                                 frmline->x += -lsb; // so that the glyph's overflow is at original frmline->x
                         }
                         else {
-                            frmline->x -= getLineStartHang(wstart, end, usable_left_overflow,
-                                                          !optimalLine && !preFormattedOnly);
+                            int shift_x = optimalLine ? optimalLine->hang_left :
+                                    getLineStartHang(wstart, end, usable_left_overflow,
+                                                     !preFormattedOnly);
+                            frmline->x -= shift_x;
                         }
                     }
 
@@ -4731,8 +4735,9 @@ public:
                             }
                         }
                         else {
-                            int shift_w = getLineEndHang(lastnonspace, end, usable_right_overflow,
-                                                         !optimalLine && !preFormattedOnly);
+                            int shift_w = optimalLine ? optimalLine->hang_right :
+                                    getLineEndHang(lastnonspace, end, usable_right_overflow,
+                                                   !preFormattedOnly);
                             word->width -= shift_w;
                             // This last word will overflow over frmline->width: remember it,
                             // so we can include it in the drawing of native text selection.
@@ -5103,23 +5108,47 @@ public:
         return m_widths[end-1] - (start > 0 ? m_widths[start-1] : 0);
     }
 
-    void addOptimalBox(std::vector<KPItem> & items, int start, int end) {
+    int getOptimalStartHang(int start, int end, int usableLeftOverflow) {
+        while ( start < end &&
+                ((m_flags[start] & (LCHAR_IS_COLLAPSED_SPACE|LCHAR_IS_TO_IGNORE)) ||
+                 ((m_srcs[start]->flags & LTEXT_SRC_IS_OBJECT) &&
+                  (m_srcs[start]->o.objflags & LTEXT_OBJECT_IS_FLOAT))) ) {
+            start++;
+        }
+        if ( start >= end || (m_srcs[start]->flags & LTEXT_SRC_IS_OBJECT) )
+            return 0;
+        return getLineStartHang(start, end, usableLeftOverflow, true);
+    }
+
+    int getOptimalEndHang(int pos, int usableRightOverflow) {
+        int end = pos + 1;
+        while ( pos >= 0 && (m_flags[pos] & LCHAR_IS_SPACE) )
+            pos--;
+        if ( pos < 0 || (m_srcs[pos]->flags & LTEXT_SRC_IS_OBJECT) )
+            return 0;
+        return getLineEndHang(pos, end, usableRightOverflow, true);
+    }
+
+    void addOptimalBox(std::vector<KPItem> & items, int start, int end,
+            bool allowHanging, int usableLeftOverflow) {
         if ( end <= start )
             return;
+        int protrusion = allowHanging ?
+                getOptimalStartHang(start, end, usableLeftOverflow) : 0;
         KPItem box = { KPItem::BOX, getOptimalRangeWidth(start, end), 0, 0,
-                       0, false, end-1, 0 };
+                       0, false, end-1, 0, protrusion };
         items.push_back(box);
     }
 
     void addOptimalRaggedBreak(std::vector<KPItem> & items, int pos,
             int fillStretch, bool & hasBox) {
         if ( !hasBox ) {
-            KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false, pos, 0 };
+            KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false, pos, 0, 0 };
             items.push_back(empty);
         }
-        KPItem blocker = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, pos, 0 };
-        KPItem fill = { KPItem::GLUE, 0, fillStretch, 0, 0, false, pos, 0 };
-        KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, pos, 0 };
+        KPItem blocker = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, pos, 0, 0 };
+        KPItem fill = { KPItem::GLUE, 0, fillStretch, 0, 0, false, pos, 0, 0 };
+        KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, pos, 0, 0 };
         items.push_back(blocker);
         items.push_back(fill);
         items.push_back(forced);
@@ -5128,8 +5157,12 @@ public:
 
     void buildOptimalItems(bool includeHyphenation, bool includeDeprecatedWraps,
             const std::vector<int> & hyphenWidths, int fillStretch,
-            std::vector<KPItem> & items) {
+            bool allowHanging, std::vector<KPItem> & items) {
         const int deprecatedPenalty = 5000;
+        int usableLeftOverflow = 0;
+        int usableRightOverflow = 0;
+        if ( allowHanging )
+            getCurrentLineUsableOverflows(usableLeftOverflow, usableRightOverflow);
         for ( int j=0; j<m_length; j++ )
             m_flags[j] &= ~LCHAR_IS_ADJUSTABLE_SPACE;
         items.clear();
@@ -5140,7 +5173,8 @@ public:
         while ( i < m_length ) {
             if ( m_text[i] == '\n' ) {
                 if ( i > boxStart ) {
-                    addOptimalBox(items, boxStart, i);
+                    addOptimalBox(items, boxStart, i, allowHanging,
+                                  usableLeftOverflow);
                     hasBox = true;
                 }
                 addOptimalRaggedBreak(items, i, fillStretch, hasBox);
@@ -5180,15 +5214,19 @@ public:
                 }
                 if ( breakPos >= 0 || !preformatted ) {
                     if ( i > boxStart ) {
-                        addOptimalBox(items, boxStart, i);
+                        addOptimalBox(items, boxStart, i, allowHanging,
+                                      usableLeftOverflow);
                         hasBox = true;
                     }
                     if ( preformatted ) {
-                        addOptimalBox(items, i, spaceEnd);
+                        addOptimalBox(items, i, spaceEnd, allowHanging,
+                                      usableLeftOverflow);
                         hasBox = true;
                         KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
                                            deprecatedBreak ? deprecatedPenalty : 0,
-                                           false, breakPos, 0 };
+                                           false, breakPos, 0,
+                                           allowHanging ? getOptimalEndHang(
+                                                   breakPos, usableRightOverflow) : 0 };
                         items.push_back(penalty);
                     }
                     else if ( spaceEnd == m_length ) {
@@ -5198,7 +5236,7 @@ public:
                         if ( breakPos >= 0 && !deprecatedBreak && hasBox &&
                                 items.back().type != KPItem::BOX ) {
                             KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false,
-                                             spaceEnd-1, 0 };
+                                             spaceEnd-1, 0, 0 };
                             items.push_back(empty);
                         }
                         int width = getOptimalRangeWidth(i, spaceEnd);
@@ -5212,19 +5250,24 @@ public:
                         // KP stretch is an additive allowance, not the final width.
                         KPItem glue = { KPItem::GLUE, width,
                                         locked ? 0 : width / 2, shrink, 0,
-                                        false, spaceEnd-1, locked ? 0 : width };
+                                        false, spaceEnd-1, locked ? 0 : width,
+                                        breakPos >= 0 && allowHanging ?
+                                            getOptimalEndHang(breakPos,
+                                                              usableRightOverflow) : 0 };
                         if ( !locked ) {
                             for ( int j=i; j<spaceEnd; j++ )
                                 m_flags[j] |= LCHAR_IS_ADJUSTABLE_SPACE;
                         }
                         if ( deprecatedBreak ) {
                             KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
-                                               deprecatedPenalty, false, breakPos, 0 };
+                                               deprecatedPenalty, false, breakPos, 0,
+                                               allowHanging ? getOptimalEndHang(
+                                                       breakPos, usableRightOverflow) : 0 };
                             items.push_back(penalty);
                         }
                         else if ( breakPos < 0 ) {
                             KPItem blocker = { KPItem::PENALTY, 0, 0, 0,
-                                               KP_INFINITY, false, spaceEnd-1, 0 };
+                                               KP_INFINITY, false, spaceEnd-1, 0, 0 };
                             items.push_back(blocker);
                         }
                         items.push_back(glue);
@@ -5241,10 +5284,13 @@ public:
                     (m_flags[i] & LCHAR_ALLOW_HYPH_WRAP_AFTER) &&
                     i < m_length-1 &&
                     !(m_flags[i+1] & LCHAR_IS_CLUSTER_TAIL) ) {
-                addOptimalBox(items, boxStart, i+1);
+                addOptimalBox(items, boxStart, i+1, allowHanging,
+                              usableLeftOverflow);
                 hasBox = true;
                 KPItem penalty = { KPItem::PENALTY, hyphenWidths[i], 0, 0,
-                                   50, true, i, 0 };
+                                   50, true, i, 0,
+                                   allowHanging ? getOptimalEndHang(
+                                           i, usableRightOverflow) : 0 };
                 items.push_back(penalty);
                 boxStart = ++i;
                 continue;
@@ -5262,12 +5308,15 @@ public:
                     duplicatesHyphen = m_srcs[i]->lang_cfg->duplicateRealHyphenOnNextLine();
                 #endif
                 if ( !duplicatesHyphen ) {
-                    addOptimalBox(items, boxStart, i+1);
+                    addOptimalBox(items, boxStart, i+1, allowHanging,
+                                  usableLeftOverflow);
                     hasBox = true;
                     KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
                                        deprecatedBreak ? deprecatedPenalty :
                                            explicitHyphen ? 50 : 0,
-                                       explicitHyphen, i, 0 };
+                                       explicitHyphen, i, 0,
+                                       allowHanging ? getOptimalEndHang(
+                                               i, usableRightOverflow) : 0 };
                     items.push_back(penalty);
                     boxStart = i + 1;
                 }
@@ -5276,7 +5325,8 @@ public:
         }
 
         if ( boxStart < m_length ) {
-            addOptimalBox(items, boxStart, m_length);
+            addOptimalBox(items, boxStart, m_length, allowHanging,
+                          usableLeftOverflow);
             hasBox = true;
         }
         if ( items.empty() || items.back().type != KPItem::PENALTY ||
@@ -5350,11 +5400,12 @@ public:
 
     bool runOptimalBreakPass(bool includeDeprecatedWraps,
             const std::vector<int> & hyphenWidths, int firstWidth,
-            int restWidth, std::vector<OptimalLineDecision> & breaks) {
+            int restWidth, bool allowHanging,
+            std::vector<OptimalLineDecision> & breaks) {
         std::vector<KPItem> items;
         int fillStretch = firstWidth > restWidth ? firstWidth : restWidth;
         buildOptimalItems(true, includeDeprecatedWraps,
-                          hyphenWidths, fillStretch, items);
+                          hyphenWidths, fillStretch, allowHanging, items);
         std::vector<KPLine> lines(m_length + 1);
         KPSpacingParams params;
         int lineCount = kp_break_paragraph_spacing(&items[0], (int)items.size(),
@@ -5365,6 +5416,7 @@ public:
         breaks.clear();
         breaks.reserve(lineCount);
         int previous = -1;
+        int previousItem = -1;
         for ( int i=0; i<lineCount; i++ ) {
             int itemIndex = lines[i].break_item;
             if ( itemIndex < 0 || itemIndex >= (int)items.size() )
@@ -5380,10 +5432,24 @@ public:
                     items[itemIndex-1].type == KPItem::GLUE &&
                     items[itemIndex-1].width == 0 &&
                     items[itemIndex-1].adjustable == 0;
+            int startItem = previousItem + 1;
+            while ( startItem < (int)items.size() &&
+                    items[startItem].type != KPItem::BOX &&
+                    !(items[startItem].type == KPItem::PENALTY &&
+                      items[startItem].penalty <= -KP_INFINITY) ) {
+                startItem++;
+            }
+            if ( startItem > itemIndex )
+                startItem = itemIndex;
+            int hangLeft = startItem < itemIndex &&
+                    items[startItem].type == KPItem::BOX ?
+                    items[startItem].protrusion : 0;
             OptimalLineDecision decision = { breakPos, lines[i].ratio_x1000,
+                    hangLeft, items[itemIndex].protrusion,
                     !ragged || lines[i].ratio_x1000 < 0 };
             breaks.push_back(decision);
             previous = breakPos;
+            previousItem = itemIndex;
         }
         return !breaks.empty() && breaks.back().wrap_pos == m_length-1;
     }
@@ -5412,11 +5478,15 @@ public:
         clearOptimalHyphenationFlags();
         std::vector<int> hyphenWidths(m_length, 0);
         hyphenateOptimalCandidates(hyphenWidths);
+        int lastAlign = (para->flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) &
+                LTEXT_FLAG_NEWLINE;
+        bool allowHanging = m_hanging_punctuation && !m_has_bidi &&
+                (lastAlign == 0 || lastAlign == LTEXT_ALIGN_LEFT);
         bool found = runOptimalBreakPass(false, hyphenWidths, firstWidth,
-                                         restWidth, breaks);
+                                         restWidth, allowHanging, breaks);
         if ( !found )
             found = runOptimalBreakPass(true, hyphenWidths, firstWidth,
-                                        restWidth, breaks);
+                                        restWidth, allowHanging, breaks);
         if ( !found ) {
             clearOptimalHyphenationFlags();
             for ( int i=0; i<m_length; i++ )

@@ -18437,11 +18437,9 @@ lUInt32 tinyNodeCollection::calcStyleHash(bool already_rendered, lUInt32 force_n
     // a _renderedBlockCache.clear() to reformat paragraphs and have the
     // word re-positioned (the paragraphs width & height do not change)
 
-    // Hanging punctuation does not need to trigger a re-render, as
-    // it's now ensured by alignLine() and won't change paragraphs height.
-    // We just need to _renderedBlockCache.clear() when it changes.
-    // if ( _hangingPunctuationEnabled )
-    //     res = res * 75 + 1761;
+    // Hanging punctuation can change optimal breaks and paragraph height.
+    if ( _optimalLineBreaking && _hangingPunctuationEnabled )
+        res = res * 75 + 1761;
 
     res = res * 31 + _renderBlockRenderingFlags;
     res = res * 31 + _interlineScaleFactor;
