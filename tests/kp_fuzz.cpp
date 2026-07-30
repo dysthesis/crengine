@@ -41,7 +41,7 @@ std::vector<KPItem> drawItems(FuzzedDataProvider & fdp)
     std::vector<KPItem> items;
     const int count = fdp.ConsumeIntegralInRange<int>(0, MAX_ITEMS);
     for (int i = 0; i < count && fdp.remaining_bytes() > 0; i++) {
-        KPItem item = { KPItem::BOX, 0, 0, 0, 0, false, i };
+        KPItem item = { KPItem::BOX, 0, 0, 0, 0, false, i, 0 };
         switch (fdp.ConsumeIntegralInRange<int>(0, 2)) {
         case 0:
             item.width = drawSize(fdp);
@@ -68,9 +68,9 @@ std::vector<KPItem> drawItems(FuzzedDataProvider & fdp)
 // validation, so append it rather than hoping the fuzzer guesses it.
 void finishParagraph(std::vector<KPItem> & items)
 {
-    const KPItem no_break = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, 0 };
-    const KPItem filler = { KPItem::GLUE, 0, 100000, 0, 0, false, 0 };
-    const KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, 0 };
+    const KPItem no_break = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, 0, 0 };
+    const KPItem filler = { KPItem::GLUE, 0, 100000, 0, 0, false, 0, 0 };
+    const KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, 0, 0 };
     items.push_back(no_break);
     items.push_back(filler);
     items.push_back(forced);
@@ -130,6 +130,50 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t * data, std::size_t siz
         std::vector<KPLine> tight(count);
         assert(kp_break_paragraph(&items[0], n_items, first_width, rest_width,
                                   params, &tight[0], count - 1) == -1);
+    }
+
+    std::vector<KPItem> spacing_items = items;
+    for (int i = 0; i < n_items; i++) {
+        KPItem & item = spacing_items[i];
+        if (item.type != KPItem::GLUE)
+            continue;
+        item.adjustable = item.width;
+        if (item.stretch > item.adjustable)
+            item.stretch = item.adjustable;
+        if (item.shrink > item.adjustable)
+            item.shrink = item.adjustable;
+    }
+    KPSpacingParams spacing_params;
+    spacing_params.double_hyphen_demerits = params.double_hyphen_demerits;
+    spacing_params.final_hyphen_demerits = params.final_hyphen_demerits;
+
+    std::vector<KPLine> spacing_lines(n_items);
+    const int spacing_count = kp_break_paragraph_spacing(&spacing_items[0],
+            n_items, first_width, rest_width, spacing_params,
+            &spacing_lines[0], n_items);
+    assert(spacing_count >= -1 && spacing_count <= n_items);
+    if (spacing_count > 0) {
+        checkBreaks(spacing_lines, spacing_count, n_items);
+        for (int i = 0; i < spacing_count; i++) {
+            assert(spacing_lines[i].ratio_x1000 >= -KP_RATIO_SCALE);
+            assert(spacing_lines[i].ratio_x1000 <= KP_RATIO_SCALE);
+        }
+    }
+
+    std::vector<KPLine> spacing_again(n_items);
+    const int spacing_recount = kp_break_paragraph_spacing(&spacing_items[0],
+            n_items, first_width, rest_width, spacing_params,
+            &spacing_again[0], n_items);
+    assert(spacing_recount == spacing_count);
+    for (int i = 0; i < spacing_count; i++) {
+        assert(spacing_again[i].break_item == spacing_lines[i].break_item);
+        assert(spacing_again[i].ratio_x1000 == spacing_lines[i].ratio_x1000);
+    }
+    if (spacing_count > 0) {
+        std::vector<KPLine> tight(spacing_count);
+        assert(kp_break_paragraph_spacing(&spacing_items[0], n_items,
+                first_width, rest_width, spacing_params, &tight[0],
+                spacing_count - 1) == -1);
     }
 
     return 0;

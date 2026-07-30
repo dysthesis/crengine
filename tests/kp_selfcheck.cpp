@@ -25,19 +25,20 @@ struct Fit {
 
 KPItem box(int width)
 {
-    KPItem item = { KPItem::BOX, width, 0, 0, 0, false, 0 };
+    KPItem item = { KPItem::BOX, width, 0, 0, 0, false, 0, 0 };
     return item;
 }
 
 KPItem glue(int width, int stretch, int shrink)
 {
-    KPItem item = { KPItem::GLUE, width, stretch, shrink, 0, false, 0 };
+    KPItem item = { KPItem::GLUE, width, stretch, shrink, 0, false, 0,
+                    width };
     return item;
 }
 
 KPItem penalty(int width, int value, bool flagged = false)
 {
-    KPItem item = { KPItem::PENALTY, width, 0, 0, value, flagged, 0 };
+    KPItem item = { KPItem::PENALTY, width, 0, 0, value, flagged, 0, 0 };
     return item;
 }
 
@@ -241,6 +242,234 @@ void assertOptimal(const std::vector<KPItem> & items,
             actual_index++;
         assert(actual_index < count && actual[actual_index] == i);
     }
+}
+
+struct SpacingOracleFit {
+    bool feasible;
+    bool has_ratio;
+    int ratio_x1000;
+};
+
+struct SpacingOracleScore {
+    int worst;
+    std::int64_t adjacent;
+    std::int64_t squared;
+    std::int64_t breaks;
+
+    SpacingOracleScore() : worst(0), adjacent(0), squared(0), breaks(0) {}
+};
+
+bool spacingScoreLess(const SpacingOracleScore & left,
+                      const SpacingOracleScore & right)
+{
+    if (left.worst != right.worst)
+        return left.worst < right.worst;
+    if (left.adjacent != right.adjacent)
+        return left.adjacent < right.adjacent;
+    if (left.squared != right.squared)
+        return left.squared < right.squared;
+    return left.breaks < right.breaks;
+}
+
+bool isRaggedBreak(const std::vector<KPItem> & items, int index)
+{
+    if (index < 2 || !isForcedBreak(items[index]))
+        return false;
+    const KPItem & blocker = items[index - 2];
+    const KPItem & fill = items[index - 1];
+    return blocker.type == KPItem::PENALTY && blocker.penalty >= KP_INFINITY
+            && fill.type == KPItem::GLUE && fill.width == 0
+            && fill.shrink == 0 && fill.adjustable == 0;
+}
+
+SpacingOracleFit spacingLineFit(const std::vector<KPItem> & items,
+                                int previous_break, int break_item,
+                                int line_width)
+{
+    int start = previous_break + 1;
+    while (start < break_item && items[start].type != KPItem::BOX
+            && !isForcedBreak(items[start]))
+        start++;
+
+    std::int64_t natural = 0;
+    std::int64_t adjustable = 0;
+    std::int64_t stretch = 0;
+    std::int64_t shrink = 0;
+    for (int i = start; i < break_item; i++) {
+        if (items[i].type == KPItem::BOX || items[i].type == KPItem::GLUE)
+            natural += items[i].width;
+        if (items[i].type == KPItem::GLUE) {
+            adjustable += items[i].adjustable;
+            stretch += items[i].stretch;
+            shrink += items[i].shrink;
+        }
+    }
+    if (items[break_item].type == KPItem::PENALTY)
+        natural += items[break_item].width;
+
+    SpacingOracleFit result = { false, false, 0 };
+    std::int64_t shortfall = line_width - natural;
+    bool ragged = isRaggedBreak(items, break_item);
+    if (shortfall == 0) {
+        result.feasible = true;
+        result.has_ratio = !ragged;
+        return result;
+    }
+    if (shortfall > 0 && ragged) {
+        result.feasible = true;
+        return result;
+    }
+
+    std::int64_t amount = shortfall > 0 ? shortfall : -shortfall;
+    std::int64_t capacity = shortfall > 0 ? stretch : shrink;
+    if (adjustable == 0 || amount > capacity)
+        return result;
+    int magnitude = static_cast<int>((amount * KP_RATIO_SCALE
+                                      + adjustable - 1) / adjustable);
+    result.feasible = true;
+    result.has_ratio = true;
+    result.ratio_x1000 = shortfall > 0 ? magnitude : -magnitude;
+    return result;
+}
+
+std::int64_t oracleBreakDemerits(const KPItem & item, bool previous_flagged,
+                                 bool final_break,
+                                 const KPSpacingParams & params)
+{
+    int value = item.type == KPItem::PENALTY ? item.penalty : 0;
+    std::int64_t result = 0;
+    if (value > 0)
+        result = static_cast<std::int64_t>(value) * value;
+    else if (value > -KP_INFINITY)
+        result = -static_cast<std::int64_t>(value) * value;
+
+    bool flagged = item.type == KPItem::PENALTY && item.flagged;
+    if (final_break && previous_flagged)
+        result += params.final_hyphen_demerits;
+    else if (flagged && previous_flagged)
+        result += params.double_hyphen_demerits;
+    return result;
+}
+
+bool calculateSpacingScore(const std::vector<KPItem> & items,
+                           const std::vector<int> & breaks,
+                           int first_width, int rest_width,
+                           const KPSpacingParams & params,
+                           SpacingOracleScore & score,
+                           std::vector<int> * ratios = NULL)
+{
+    score = SpacingOracleScore();
+    if (ratios)
+        ratios->clear();
+    int previous_break = -1;
+    int previous_ratio = 0;
+    bool previous_has_ratio = false;
+    bool previous_flagged = false;
+    for (int line = 0; line < static_cast<int>(breaks.size()); line++) {
+        int break_item = breaks[line];
+        SpacingOracleFit fit = spacingLineFit(items, previous_break, break_item,
+                line == 0 ? first_width : rest_width);
+        if (!fit.feasible)
+            return false;
+        if (ratios)
+            ratios->push_back(fit.has_ratio ? fit.ratio_x1000 : 0);
+
+        if (fit.has_ratio) {
+            int magnitude = fit.ratio_x1000 < 0 ? -fit.ratio_x1000
+                                                : fit.ratio_x1000;
+            if (magnitude > score.worst)
+                score.worst = magnitude;
+            if (previous_has_ratio) {
+                std::int64_t difference = static_cast<std::int64_t>(
+                        fit.ratio_x1000) - previous_ratio;
+                score.adjacent += difference * difference;
+            }
+            score.squared += static_cast<std::int64_t>(fit.ratio_x1000)
+                    * fit.ratio_x1000;
+        }
+
+        const KPItem & item = items[break_item];
+        bool final_break = break_item == static_cast<int>(items.size()) - 1;
+        score.breaks += oracleBreakDemerits(item, previous_flagged,
+                                            final_break, params);
+        previous_break = break_item;
+        previous_ratio = fit.ratio_x1000;
+        previous_has_ratio = fit.has_ratio;
+        previous_flagged = item.type == KPItem::PENALTY && item.flagged;
+    }
+    return !breaks.empty()
+            && breaks.back() == static_cast<int>(items.size()) - 1;
+}
+
+bool minimumSpacingScore(const std::vector<KPItem> & items,
+                         int first_width, int rest_width,
+                         const KPSpacingParams & params,
+                         SpacingOracleScore & minimum)
+{
+    int optional_count = 0;
+    for (int i = 0; i < static_cast<int>(items.size()); i++) {
+        if (legalBreak(items, i) && !isForcedBreak(items[i]))
+            optional_count++;
+    }
+    assert(optional_count < 63);
+
+    bool found = false;
+    const std::uint64_t combination_count =
+            static_cast<std::uint64_t>(1) << optional_count;
+    for (std::uint64_t mask = 0; mask < combination_count; mask++) {
+        std::vector<int> breaks;
+        int optional_index = 0;
+        for (int i = 0; i < static_cast<int>(items.size()); i++) {
+            if (!legalBreak(items, i))
+                continue;
+            if (isForcedBreak(items[i])
+                    || (mask & (static_cast<std::uint64_t>(1)
+                                << optional_index)))
+                breaks.push_back(i);
+            if (!isForcedBreak(items[i]))
+                optional_index++;
+        }
+
+        SpacingOracleScore score;
+        if (calculateSpacingScore(items, breaks, first_width, rest_width,
+                                  params, score)
+                && (!found || spacingScoreLess(score, minimum))) {
+            minimum = score;
+            found = true;
+        }
+    }
+    return found;
+}
+
+void assertSpacingOptimal(const std::vector<KPItem> & items,
+                          int first_width, int rest_width,
+                          const KPSpacingParams & params)
+{
+    SpacingOracleScore minimum;
+    bool feasible = minimumSpacingScore(items, first_width, rest_width,
+                                        params, minimum);
+    std::vector<KPLine> lines(items.size());
+    int count = kp_break_paragraph_spacing(&items[0], items.size(),
+            first_width, rest_width, params, &lines[0], lines.size());
+    if (!feasible) {
+        assert(count == -1);
+        return;
+    }
+    assert(count > 0);
+
+    std::vector<int> actual;
+    for (int i = 0; i < count; i++)
+        actual.push_back(lines[i].break_item);
+    SpacingOracleScore actual_score;
+    std::vector<int> ratios;
+    if (!calculateSpacingScore(items, actual, first_width, rest_width,
+                               params, actual_score, &ratios)
+            || spacingScoreLess(actual_score, minimum)
+            || spacingScoreLess(minimum, actual_score))
+        std::abort();
+    assert(static_cast<int>(ratios.size()) == count);
+    for (int i = 0; i < count; i++)
+        assert(lines[i].ratio_x1000 == ratios[i]);
 }
 
 unsigned nextRandom(unsigned & state)
@@ -511,6 +740,117 @@ void checkGeneratedOptimality()
     }
 }
 
+void checkSpacingObjective()
+{
+    KPSpacingParams params;
+    KPLine lines[8];
+
+    // A legal hyphen beats the feasible ordinary break on spacing quality.
+    std::vector<KPItem> mixed;
+    mixed.push_back(box(4));
+    mixed.push_back(glue(2, 2, 2));
+    mixed.push_back(box(4));
+    mixed.push_back(glue(2, 2, 2));
+    mixed.push_back(box(4));
+    mixed.push_back(penalty(1, 50, true));
+    mixed.push_back(box(4));
+    mixed.push_back(glue(2, 2, 2));
+    mixed.push_back(box(4));
+    mixed.push_back(glue(2, 2, 2));
+    mixed.push_back(box(4));
+    finishParagraph(mixed);
+    int count = kp_break_paragraph_spacing(&mixed[0], mixed.size(), 17, 17,
+                                            params, lines, 8);
+    assert(count == 2 && lines[0].break_item == 5);
+    assert(lines[0].ratio_x1000 == 0 && lines[1].ratio_x1000 == 0);
+    assertSpacingOptimal(mixed, 17, 17, params);
+
+    // The bound rounds away from zero and capacities remain hard limits.
+    std::vector<KPItem> bounded;
+    bounded.push_back(box(3));
+    bounded.push_back(glue(3, 1, 1));
+    bounded.push_back(box(3));
+    bounded.push_back(glue(3, 1, 1));
+    bounded.push_back(box(3));
+    finishParagraph(bounded);
+    count = kp_break_paragraph_spacing(&bounded[0], bounded.size(), 10, 10,
+                                       params, lines, 8);
+    assert(count == 2 && lines[0].break_item == 3);
+    assert(lines[0].ratio_x1000 == 334 && lines[1].ratio_x1000 == 0);
+    assert(kp_break_paragraph_spacing(&bounded[0], bounded.size(), 11, 11,
+                                      params, lines, 8) == -1);
+    count = kp_break_paragraph_spacing(&bounded[0], bounded.size(), 8, 8,
+                                       params, lines, 8);
+    assert(count == 2 && lines[0].ratio_x1000 == -334);
+    assert(kp_break_paragraph_spacing(&bounded[0], bounded.size(), 7, 7,
+                                      params, lines, 8) == -1);
+
+    std::vector<KPItem> no_space;
+    no_space.push_back(box(3));
+    no_space.push_back(penalty(0, 0));
+    no_space.push_back(box(3));
+    finishParagraph(no_space);
+    assert(kp_break_paragraph_spacing(&no_space[0], no_space.size(), 3, 3,
+                                      params, lines, 8) == 2);
+    assert(kp_break_paragraph_spacing(&no_space[0], no_space.size(), 4, 4,
+                                      params, lines, 8) == -1);
+
+    KPLine untouched[1] = { { -7, -7 } };
+    assert(kp_break_paragraph_spacing(&mixed[0], mixed.size(), 17, 17,
+                                      params, untouched, 1) == -1);
+    assert(untouched[0].break_item == -7 && untouched[0].ratio_x1000 == -7);
+}
+
+void checkGeneratedSpacingOptimality()
+{
+    static const int penalties[] = { -500, 0, 50, 5000 };
+    unsigned state = 0x4b505f32U;
+    for (int test = 0; test < 5000; test++) {
+        std::vector<KPItem> items;
+        int word_count = 1 + draw(state, 5);
+        for (int word = 0; word < word_count; word++) {
+            items.push_back(box(1 + draw(state, 12)));
+            if (word == word_count - 1)
+                continue;
+
+            switch (draw(state, 5)) {
+            case 0: {
+                int width = 1 + draw(state, 4);
+                items.push_back(glue(width, draw(state, width + 1),
+                                     draw(state, width + 1)));
+                break;
+            }
+            case 1:
+                items.push_back(penalty(draw(state, 3),
+                        penalties[draw(state, 4)], draw(state, 2) != 0));
+                break;
+            case 2: {
+                items.push_back(penalty(0, KP_INFINITY));
+                int width = 1 + draw(state, 4);
+                items.push_back(glue(width, draw(state, width + 1),
+                                     draw(state, width + 1)));
+                break;
+            }
+            case 3:
+                items.push_back(penalty(0, 0));
+                break;
+            default:
+                items.push_back(penalty(0, KP_INFINITY));
+                items.push_back(glue(0, 100000, 0));
+                items.push_back(penalty(0, -KP_INFINITY));
+                break;
+            }
+        }
+        finishParagraph(items);
+
+        KPSpacingParams params;
+        params.double_hyphen_demerits = draw(state, 3) == 0 ? 0 : 10000;
+        params.final_hyphen_demerits = draw(state, 3) == 0 ? 0 : 5000;
+        assertSpacingOptimal(items, 3 + draw(state, 18),
+                             3 + draw(state, 18), params);
+    }
+}
+
 void checkEdgeCases()
 {
     KPParams params;
@@ -580,6 +920,8 @@ int main()
     checkPaperParagraph();
     checkExhaustiveOptimality();
     checkGeneratedOptimality();
+    checkSpacingObjective();
+    checkGeneratedSpacingOptimality();
     checkEdgeCases();
     std::puts("kp_selfcheck: ok");
     return 0;

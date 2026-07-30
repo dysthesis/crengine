@@ -12,7 +12,7 @@
 #ifndef LVKPLINEBREAK_H_INCLUDED
 #define LVKPLINEBREAK_H_INCLUDED
 
-enum { KP_INFINITY = 10000 };
+enum { KP_RATIO_SCALE = 1000, KP_INFINITY = 10000 };
 
 struct KPItem {
     enum Type { BOX, GLUE, PENALTY } type;
@@ -22,6 +22,7 @@ struct KPItem {
     int penalty;
     bool flagged;
     int pos;
+    int adjustable;
 };
 
 struct KPParams {
@@ -45,6 +46,16 @@ struct KPLine {
     int ratio_x1000;
 };
 
+struct KPSpacingParams {
+    int double_hyphen_demerits;
+    int final_hyphen_demerits;
+
+    KPSpacingParams()
+        : double_hyphen_demerits(10000), final_hyphen_demerits(5000)
+    {
+    }
+};
+
 /**
  * Find the minimum-demerit break sequence for one pass.
  *
@@ -59,5 +70,27 @@ struct KPLine {
 int kp_break_paragraph(const KPItem * items, int n_items,
                        int first_line_width, int rest_width,
                        const KPParams & params, KPLine * out, int max_out);
+
+/**
+ * Minimise justified word-space variation over one candidate graph.
+ *
+ * GLUE.adjustable is the natural width of spaces that rendering may adjust;
+ * its stretch and shrink are hard capacities and must not exceed adjustable.
+ * Paragraph-end fill glue is recognised by the usual infinite-penalty, glue,
+ * forced-penalty sequence and is kept ragged with a zero output ratio.
+ * ratio_x1000 is the signed adjustment divided by adjustable width, rounded
+ * away from zero so its magnitude is also a conservative feasibility bound.
+ *
+ * The score is lexicographic: worst absolute ratio, adjacent-ratio variation,
+ * total squared ratio, then break/hyphen demerits. Ordinary and discretionary
+ * breakpoints must therefore be supplied together in one item list.
+ *
+ * Returns the line count, or -1 under the same conditions as
+ * kp_break_paragraph(). Empty input returns zero.
+ */
+int kp_break_paragraph_spacing(const KPItem * items, int n_items,
+                               int first_line_width, int rest_width,
+                               const KPSpacingParams & params,
+                               KPLine * out, int max_out);
 
 #endif // LVKPLINEBREAK_H_INCLUDED

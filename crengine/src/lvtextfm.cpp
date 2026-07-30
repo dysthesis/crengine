@@ -4978,19 +4978,19 @@ public:
         if ( end <= start )
             return;
         KPItem box = { KPItem::BOX, getOptimalRangeWidth(start, end), 0, 0,
-                       0, false, end-1 };
+                       0, false, end-1, 0 };
         items.push_back(box);
     }
 
     void addOptimalRaggedBreak(std::vector<KPItem> & items, int pos,
             int fillStretch, bool & hasBox) {
         if ( !hasBox ) {
-            KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false, pos };
+            KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false, pos, 0 };
             items.push_back(empty);
         }
-        KPItem blocker = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, pos };
-        KPItem fill = { KPItem::GLUE, 0, fillStretch, 0, 0, false, pos };
-        KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, pos };
+        KPItem blocker = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, pos, 0 };
+        KPItem fill = { KPItem::GLUE, 0, fillStretch, 0, 0, false, pos, 0 };
+        KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, pos, 0 };
         items.push_back(blocker);
         items.push_back(fill);
         items.push_back(forced);
@@ -5056,13 +5056,13 @@ public:
                         hasBox = true;
                         KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
                                            deprecatedBreak ? deprecatedPenalty : 0,
-                                           false, breakPos };
+                                           false, breakPos, 0 };
                         items.push_back(penalty);
                     }
                     else {
                         if ( hasBox && items.back().type != KPItem::BOX ) {
                             KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false,
-                                             breakPos };
+                                             breakPos, 0 };
                             items.push_back(empty);
                         }
                         int width = getOptimalRangeWidth(i, breakPos+1);
@@ -5076,10 +5076,10 @@ public:
                         // KP stretch is an additive allowance, not the final width.
                         KPItem glue = { KPItem::GLUE, width,
                                         locked ? 0 : width / 2, shrink, 0,
-                                        false, breakPos };
+                                        false, breakPos, locked ? 0 : width };
                         if ( deprecatedBreak && hasBox ) {
                             KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
-                                               deprecatedPenalty, false, breakPos };
+                                               deprecatedPenalty, false, breakPos, 0 };
                             items.push_back(penalty);
                         }
                         items.push_back(glue);
@@ -5099,7 +5099,7 @@ public:
                 addOptimalBox(items, boxStart, i+1);
                 hasBox = true;
                 KPItem penalty = { KPItem::PENALTY, hyphenWidths[i], 0, 0,
-                                   50, true, i };
+                                   50, true, i, 0 };
                 items.push_back(penalty);
                 boxStart = ++i;
                 continue;
@@ -5122,7 +5122,7 @@ public:
                     KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
                                        deprecatedBreak ? deprecatedPenalty :
                                            explicitHyphen ? 50 : 0,
-                                       explicitHyphen, i };
+                                       explicitHyphen, i, 0 };
                     items.push_back(penalty);
                     boxStart = i + 1;
                 }

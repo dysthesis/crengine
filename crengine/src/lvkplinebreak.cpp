@@ -33,8 +33,9 @@ struct Totals {
     std::int64_t width;
     std::int64_t stretch;
     std::int64_t shrink;
+    std::int64_t adjustable;
 
-    Totals() : width(0), stretch(0), shrink(0) {}
+    Totals() : width(0), stretch(0), shrink(0), adjustable(0) {}
 };
 
 struct LineFit {
@@ -85,7 +86,8 @@ bool buildPrefixTotals(const KPItem * items, int n_items,
         case KPItem::GLUE:
             if (!addMetric(prefix[i + 1].width, item.width)
                     || !addMetric(prefix[i + 1].stretch, item.stretch)
-                    || !addMetric(prefix[i + 1].shrink, item.shrink))
+                    || !addMetric(prefix[i + 1].shrink, item.shrink)
+                    || !addMetric(prefix[i + 1].adjustable, item.adjustable))
                 return false;
             break;
         case KPItem::PENALTY:
@@ -218,6 +220,369 @@ bool validParams(const KPParams & params)
             && params.double_hyphen_demerits >= 0
             && params.final_hyphen_demerits >= 0
             && params.emergency_stretch >= 0;
+}
+
+struct SpacingFit {
+    int ratio_x1000;
+    bool feasible;
+    bool overfull;
+    bool has_ratio;
+};
+
+struct SpacingScore {
+    Demerits adjacent;
+    Demerits squared;
+    Demerits breaks;
+
+    SpacingScore() : adjacent(0), squared(0), breaks(0) {}
+};
+
+struct SpacingNode {
+    int break_item;
+    int previous;
+    int line_count;
+    int ratio_x1000;
+    bool has_ratio;
+    bool flagged;
+    SpacingScore score;
+};
+
+struct SpacingCandidate {
+    int previous;
+    int line_count;
+    int ratio_x1000;
+    bool has_ratio;
+    SpacingScore score;
+};
+
+struct ReachableBreak {
+    int break_item;
+    int line_count;
+};
+
+bool isRaggedBreak(const KPItem * items, int index)
+{
+    if (index < 2 || !isForced(items[index]))
+        return false;
+    const KPItem & blocker = items[index - 2];
+    const KPItem & fill = items[index - 1];
+    return blocker.type == KPItem::PENALTY && blocker.penalty >= KP_INFINITY
+            && fill.type == KPItem::GLUE && fill.width == 0
+            && fill.shrink == 0 && fill.adjustable == 0;
+}
+
+bool isRaggedFill(const KPItem * items, int n_items, int index)
+{
+    return index + 1 < n_items && items[index].type == KPItem::GLUE
+            && isRaggedBreak(items, index + 1);
+}
+
+bool validSpacingParams(const KPSpacingParams & params)
+{
+    return params.double_hyphen_demerits >= 0
+            && params.final_hyphen_demerits >= 0;
+}
+
+bool validSpacingItems(const KPItem * items, int n_items)
+{
+    for (int i = 0; i < n_items; i++) {
+        const KPItem & item = items[i];
+        if (item.type != KPItem::GLUE || isRaggedFill(items, n_items, i))
+            continue;
+        if (item.adjustable > item.width || item.stretch > item.adjustable
+                || item.shrink > item.adjustable)
+            return false;
+    }
+    return true;
+}
+
+int ratioAwayFromZero(std::int64_t amount, std::int64_t adjustable,
+                      bool negative)
+{
+    std::int64_t magnitude = (amount * KP_RATIO_SCALE + adjustable - 1)
+            / adjustable;
+    if (magnitude > INT_MAX)
+        return negative ? INT_MIN : INT_MAX;
+    int result = static_cast<int>(magnitude);
+    return negative ? -result : result;
+}
+
+SpacingFit fitSpacingLine(std::int64_t natural, std::int64_t adjustable,
+                          std::int64_t stretch, std::int64_t shrink,
+                          int target, bool ragged)
+{
+    SpacingFit result = { 0, false, false, false };
+    std::int64_t shortfall = static_cast<std::int64_t>(target) - natural;
+    if (shortfall == 0) {
+        result.feasible = true;
+        result.has_ratio = !ragged;
+        return result;
+    }
+    if (shortfall > 0) {
+        if (ragged) {
+            result.feasible = true;
+            return result;
+        }
+        if (adjustable == 0 || shortfall > stretch)
+            return result;
+        result.ratio_x1000 = ratioAwayFromZero(shortfall, adjustable, false);
+        result.feasible = true;
+        result.has_ratio = true;
+        return result;
+    }
+
+    std::int64_t excess = -shortfall;
+    if (adjustable == 0 || excess > shrink) {
+        result.overfull = true;
+        return result;
+    }
+    result.ratio_x1000 = ratioAwayFromZero(excess, adjustable, true);
+    result.feasible = true;
+    result.has_ratio = true;
+    return result;
+}
+
+bool spacingScoreLess(const SpacingScore & left, const SpacingScore & right)
+{
+    if (left.adjacent != right.adjacent)
+        return left.adjacent < right.adjacent;
+    if (left.squared != right.squared)
+        return left.squared < right.squared;
+    return left.breaks < right.breaks;
+}
+
+Demerits squaredDifference(int left, int right)
+{
+    Demerits difference = static_cast<Demerits>(left) - right;
+    return difference * difference;
+}
+
+Demerits spacingBreakDemerits(const SpacingNode & previous,
+                              const KPItem & item,
+                              const KPSpacingParams & params,
+                              bool final_break)
+{
+    Demerits result = 0;
+    int penalty = item.type == KPItem::PENALTY ? item.penalty : 0;
+    if (penalty > 0)
+        result = static_cast<Demerits>(penalty) * penalty;
+    else if (penalty > -KP_INFINITY)
+        result = -static_cast<Demerits>(penalty) * penalty;
+
+    bool flagged = item.type == KPItem::PENALTY && item.flagged;
+    if (final_break && previous.flagged)
+        result = addDemerits(result, params.final_hyphen_demerits);
+    else if (flagged && previous.flagged)
+        result = addDemerits(result, params.double_hyphen_demerits);
+    return result;
+}
+
+void getSpacingMetrics(const std::vector<Totals> & prefix, int start,
+                       int break_item, const KPItem & item,
+                       std::int64_t & natural, std::int64_t & adjustable,
+                       std::int64_t & stretch, std::int64_t & shrink)
+{
+    natural = prefix[break_item].width - prefix[start].width;
+    adjustable = prefix[break_item].adjustable - prefix[start].adjustable;
+    stretch = prefix[break_item].stretch - prefix[start].stretch;
+    shrink = prefix[break_item].shrink - prefix[start].shrink;
+    if (item.type == KPItem::PENALTY)
+        natural += item.width;
+}
+
+bool spacingPathExists(const KPItem * items, int n_items,
+                       int first_line_width, int rest_width, int ratio_bound,
+                       const std::vector<Totals> & prefix,
+                       const std::vector<int> & next_nondiscardable)
+{
+    std::vector<ReachableBreak> nodes;
+    std::vector<int> active;
+    ReachableBreak initial = { -1, 0 };
+    nodes.push_back(initial);
+    active.push_back(0);
+
+    for (int break_item = 0; break_item < n_items; break_item++) {
+        if (!isLegalBreak(items, break_item))
+            continue;
+        const KPItem & item = items[break_item];
+        bool forced = isForced(item);
+        bool final_break = forced && break_item == n_items - 1;
+        bool ragged = isRaggedBreak(items, break_item);
+        std::vector<int> surviving;
+        std::vector<ReachableBreak> candidates;
+
+        for (std::vector<int>::const_iterator it = active.begin();
+                it != active.end(); ++it) {
+            const ReachableBreak & previous = nodes[*it];
+            int start = next_nondiscardable[previous.break_item + 1];
+            if (start > break_item)
+                start = break_item;
+
+            std::int64_t natural;
+            std::int64_t adjustable;
+            std::int64_t stretch;
+            std::int64_t shrink;
+            getSpacingMetrics(prefix, start, break_item, item, natural,
+                              adjustable, stretch, shrink);
+            int target = previous.line_count == 0 ? first_line_width
+                                                  : rest_width;
+            SpacingFit fit = fitSpacingLine(natural, adjustable, stretch,
+                                            shrink, target, ragged);
+            bool permanently_overfull = fit.overfull;
+            if (permanently_overfull && item.type == KPItem::PENALTY) {
+                permanently_overfull = natural - item.width >
+                        static_cast<std::int64_t>(target) + shrink;
+            }
+            if (!forced && !permanently_overfull)
+                surviving.push_back(*it);
+            int magnitude = fit.ratio_x1000 < 0 ? -fit.ratio_x1000
+                                                : fit.ratio_x1000;
+            if (!fit.feasible || (fit.has_ratio && magnitude > ratio_bound))
+                continue;
+
+            int line_count = previous.line_count + 1;
+            bool duplicate = false;
+            for (std::vector<ReachableBreak>::const_iterator candidate =
+                    candidates.begin(); candidate != candidates.end(); ++candidate) {
+                if (candidate->line_count == line_count) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                ReachableBreak candidate = { break_item, line_count };
+                candidates.push_back(candidate);
+            }
+        }
+
+        active.swap(surviving);
+        for (std::vector<ReachableBreak>::const_iterator it = candidates.begin();
+                it != candidates.end(); ++it) {
+            nodes.push_back(*it);
+            active.push_back(static_cast<int>(nodes.size()) - 1);
+        }
+        if (forced && active.empty())
+            return false;
+        if (final_break)
+            return !active.empty();
+    }
+    return false;
+}
+
+int optimiseSpacingPath(const KPItem * items, int n_items,
+                        int first_line_width, int rest_width, int ratio_bound,
+                        const KPSpacingParams & params,
+                        const std::vector<Totals> & prefix,
+                        const std::vector<int> & next_nondiscardable,
+                        std::vector<SpacingNode> & nodes)
+{
+    std::vector<int> active;
+    SpacingNode initial = { -1, -1, 0, 0, false, false, SpacingScore() };
+    nodes.clear();
+    nodes.push_back(initial);
+    active.push_back(0);
+
+    std::vector<int> final_nodes;
+    for (int break_item = 0; break_item < n_items; break_item++) {
+        if (!isLegalBreak(items, break_item))
+            continue;
+        const KPItem & item = items[break_item];
+        bool forced = isForced(item);
+        bool final_break = forced && break_item == n_items - 1;
+        bool ragged = isRaggedBreak(items, break_item);
+        std::vector<int> surviving;
+        std::vector<SpacingCandidate> candidates;
+
+        for (std::vector<int>::const_iterator it = active.begin();
+                it != active.end(); ++it) {
+            int previous_index = *it;
+            const SpacingNode & previous = nodes[previous_index];
+            int start = next_nondiscardable[previous.break_item + 1];
+            if (start > break_item)
+                start = break_item;
+
+            std::int64_t natural;
+            std::int64_t adjustable;
+            std::int64_t stretch;
+            std::int64_t shrink;
+            getSpacingMetrics(prefix, start, break_item, item, natural,
+                              adjustable, stretch, shrink);
+            int target = previous.line_count == 0 ? first_line_width
+                                                  : rest_width;
+            SpacingFit fit = fitSpacingLine(natural, adjustable, stretch,
+                                            shrink, target, ragged);
+            bool permanently_overfull = fit.overfull;
+            if (permanently_overfull && item.type == KPItem::PENALTY) {
+                permanently_overfull = natural - item.width >
+                        static_cast<std::int64_t>(target) + shrink;
+            }
+            if (!forced && !permanently_overfull)
+                surviving.push_back(previous_index);
+            int magnitude = fit.ratio_x1000 < 0 ? -fit.ratio_x1000
+                                                : fit.ratio_x1000;
+            if (!fit.feasible || (fit.has_ratio && magnitude > ratio_bound))
+                continue;
+
+            SpacingScore score = previous.score;
+            if (fit.has_ratio) {
+                if (previous.has_ratio) {
+                    score.adjacent = addDemerits(score.adjacent,
+                            squaredDifference(fit.ratio_x1000,
+                                              previous.ratio_x1000));
+                }
+                score.squared = addDemerits(score.squared,
+                        squaredDifference(fit.ratio_x1000, 0));
+            }
+            score.breaks = addDemerits(score.breaks,
+                    spacingBreakDemerits(previous, item, params, final_break));
+
+            SpacingCandidate candidate = {
+                previous_index, previous.line_count + 1,
+                fit.ratio_x1000, fit.has_ratio, score
+            };
+            int match = -1;
+            for (int i = 0; i < static_cast<int>(candidates.size()); i++) {
+                if (candidates[i].line_count == candidate.line_count
+                        && candidates[i].has_ratio == candidate.has_ratio
+                        && (!candidate.has_ratio || candidates[i].ratio_x1000
+                                == candidate.ratio_x1000)) {
+                    match = i;
+                    break;
+                }
+            }
+            if (match < 0)
+                candidates.push_back(candidate);
+            else if (spacingScoreLess(candidate.score, candidates[match].score))
+                candidates[match] = candidate;
+        }
+
+        active.swap(surviving);
+        for (std::vector<SpacingCandidate>::const_iterator it = candidates.begin();
+                it != candidates.end(); ++it) {
+            SpacingNode node = {
+                break_item, it->previous, it->line_count, it->ratio_x1000,
+                it->has_ratio,
+                item.type == KPItem::PENALTY && item.flagged, it->score
+            };
+            nodes.push_back(node);
+            active.push_back(static_cast<int>(nodes.size()) - 1);
+        }
+        if (forced && active.empty())
+            return -1;
+        if (final_break) {
+            final_nodes = active;
+            break;
+        }
+    }
+
+    if (final_nodes.empty())
+        return -1;
+    int best = final_nodes[0];
+    for (int i = 1; i < static_cast<int>(final_nodes.size()); i++) {
+        if (spacingScoreLess(nodes[final_nodes[i]].score, nodes[best].score))
+            best = final_nodes[i];
+    }
+    return best;
 }
 
 } // namespace
@@ -363,6 +728,67 @@ int kp_break_paragraph(const KPItem * items, int n_items,
     for (int i = line_count - 1; i >= 0; i--) {
         out[i].break_item = nodes[node_index].break_item;
         out[i].ratio_x1000 = nodes[node_index].ratio_x1000;
+        node_index = nodes[node_index].previous;
+    }
+    return node_index == 0 ? line_count : -1;
+}
+
+int kp_break_paragraph_spacing(const KPItem * items, int n_items,
+                               int first_line_width, int rest_width,
+                               const KPSpacingParams & params,
+                               KPLine * out, int max_out)
+{
+    if (n_items < 0 || n_items == INT_MAX || max_out < 0
+            || first_line_width <= 0 || rest_width <= 0
+            || !validSpacingParams(params))
+        return -1;
+    if (n_items == 0)
+        return 0;
+    if (!items || (max_out > 0 && !out) || !isForced(items[n_items - 1]))
+        return -1;
+
+    std::vector<Totals> prefix;
+    if (!buildPrefixTotals(items, n_items, prefix)
+            || !validSpacingItems(items, n_items))
+        return -1;
+
+    std::vector<int> next_nondiscardable(n_items + 1, n_items);
+    for (int i = n_items - 1; i >= 0; i--) {
+        if (items[i].type == KPItem::BOX || isForced(items[i]))
+            next_nondiscardable[i] = i;
+        else
+            next_nondiscardable[i] = next_nondiscardable[i + 1];
+    }
+
+    if (!spacingPathExists(items, n_items, first_line_width, rest_width,
+                           KP_RATIO_SCALE, prefix, next_nondiscardable))
+        return -1;
+    int lower = 0;
+    int upper = KP_RATIO_SCALE;
+    while (lower < upper) {
+        int middle = lower + (upper - lower) / 2;
+        if (spacingPathExists(items, n_items, first_line_width, rest_width,
+                              middle, prefix, next_nondiscardable))
+            upper = middle;
+        else
+            lower = middle + 1;
+    }
+
+    std::vector<SpacingNode> nodes;
+    int best = optimiseSpacingPath(items, n_items, first_line_width, rest_width,
+                                   lower, params, prefix,
+                                   next_nondiscardable, nodes);
+    if (best < 0)
+        return -1;
+    int line_count = nodes[best].line_count;
+    if (line_count > max_out || (line_count > 0 && !out))
+        return -1;
+
+    int node_index = best;
+    for (int i = line_count - 1; i >= 0; i--) {
+        out[i].break_item = nodes[node_index].break_item;
+        out[i].ratio_x1000 = nodes[node_index].has_ratio
+                ? nodes[node_index].ratio_x1000 : 0;
         node_index = nodes[node_index].previous;
     }
     return node_index == 0 ? line_count : -1;
