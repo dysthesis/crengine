@@ -3404,6 +3404,117 @@ public:
         }
     }
 
+    /// hanging punctuation width at the first glyph of a line ending at 'end':
+    /// how far its ink may cross the left margin. Can be negative, which shifts
+    /// the line in so a glyph's own negative left side bearing fits the margin.
+    int getLineStartHang( int wstart, int end, int usable_left_overflow, bool allow_hanging )
+    {
+        if ( m_srcs[wstart]->flags & LTEXT_SRC_IS_OBJECT ) // no glyph to hang
+            return 0;
+        LVFont * font = (LVFont *)m_srcs[wstart]->t.font;
+        int lsb = font->getLeftSideBearing(m_text[wstart]);
+        int shift_x = 0;
+        // We prevent hanging punctuation on the common opening quotation marks
+        // or dashes that we flagged with LCHAR_LOCKED_SPACING (most of these
+        // are characters that can hang) - and on fully-pre lines and when
+        // the font is monospace.
+        // Note that some CJK fonts might have full-width glyphs for some of our
+        // common hanging chars, but not for others, and this might look bad with
+        // them, and different whether it is used as the main font or as a fallback.
+        // (Noto Sans CJK SC has full-width glyphs for single or double quotation
+        // marks (‘ ’ “ ”), but not for all our other hanging chars.)
+        // Reducing CJK half-blank full-width glyphs's width should be handled
+        // more generically elsewhere.
+        // We try to avoid hanging these with some heuristic below.
+        if ( allow_hanging && m_hanging_punctuation &&
+                !(m_flags[wstart] & LCHAR_LOCKED_SPACING) &&
+                font->getFontFamily() != css_ff_monospace ) {
+            bool check_font;
+            int percent = m_srcs[wstart]->lang_cfg->getHangingPercent(false, m_para_dir_is_rtl, check_font, m_text, wstart, end-wstart-1);
+            if ( percent && check_font && lsb < 0 ) {
+                // Some fonts might already have enough negative
+                // left side bearing for some chars, that would
+                // make them naturally hang on the left.
+                percent = 0;
+            }
+            if ( percent ) {
+                int first_char_width = m_widths[wstart] - (wstart>0 ? m_widths[wstart-1] : 0);
+                shift_x = first_char_width * percent / 100;
+                if ( shift_x == 0 ) // Force at least 1px if division rounded it to 0
+                    shift_x = 1;
+                // Cancel it if this char looks like it might be full-width
+                // (0.9 * font size, in case HarfBuzz has reduced the advance)
+                // and it has a lot of positive left side bearing (left half
+                // of the glyph blank) - see above.
+                if ( first_char_width > 0.9 * font->getSize() && lsb > 0.4 * first_char_width ) {
+                    shift_x = 0;
+                }
+            }
+        }
+        if ( shift_x - lsb > usable_left_overflow )
+            shift_x = usable_left_overflow + lsb;
+        return shift_x;
+    }
+
+    /// hanging punctuation width at the last drawn glyph ('lastnonspace') of a
+    /// line ending at 'end': how far its ink may cross the right margin. Can be
+    /// negative, see getLineStartHang().
+    int getLineEndHang( int lastnonspace, int end, int usable_right_overflow, bool allow_hanging )
+    {
+        if ( m_srcs[lastnonspace]->flags & LTEXT_SRC_IS_OBJECT ) // no glyph to hang
+            return 0;
+        LVFont * font = (LVFont *)m_srcs[lastnonspace]->t.font;
+        bool ends_with_hyphen = m_flags[lastnonspace] & LCHAR_ALLOW_HYPH_WRAP_AFTER;
+        // don't bother with hyphen rsb, which can't overflow
+        int rsb = ends_with_hyphen ? 0 : font->getRightSideBearing(m_text[lastnonspace]);
+        int shift_w = 0;
+        // We prevent hanging punctuation in a few cases (see getLineStartHang())
+        if ( allow_hanging && m_hanging_punctuation &&
+                font->getFontFamily() != css_ff_monospace ) {
+            if ( ends_with_hyphen ) {
+                int percent = m_srcs[lastnonspace]->lang_cfg->getHyphenHangingPercent();
+                if ( percent ) {
+                    shift_w = font->getHyphenWidth() * percent / 100;
+                    if ( shift_w == 0 ) // Force at least 1px if division rounded it to 0
+                        shift_w = 1;
+                }
+                // Note: some part of text in bold or in a bigger font size inside
+                // a paragraph may stand out more than the regular text, and this
+                // is quite noticable with the hyphen.
+                // We might want to limit or force hyphen hanging to what it should
+                // be with the main paragraph font, but that might not work well in
+                // some situations.
+                // See https://github.com/koreader/crengine/pull/355#issuecomment-656760791
+            }
+            else {
+                bool check_font;
+                int percent = m_srcs[lastnonspace]->lang_cfg->getHangingPercent(true, m_para_dir_is_rtl, check_font, m_text, lastnonspace, end-lastnonspace-1);
+                if ( percent && check_font && rsb < 0 ) {
+                    // Some fonts might already have enough negative
+                    // right side bearing for some chars, that would
+                    // make them naturally hang on the right.
+                    percent = 0;
+                }
+                if ( percent ) {
+                    int last_char_width = m_widths[lastnonspace] - (lastnonspace>0 ? m_widths[lastnonspace-1] : 0);
+                    shift_w = last_char_width * percent / 100;
+                    if ( shift_w == 0 ) // Force at least 1px if division rounded it to 0
+                        shift_w = 1;
+                    // Cancel it if this char looks like it might be full-width
+                    // (0.9 * font size, in case HarfBuzz has reduced the advance)
+                    // and it has a lot of positive right side bearing (right half
+                    // of the glyph blank) - see comment in getLineStartHang().
+                    if ( last_char_width > 0.9 * font->getSize() && rsb > 0.4 * last_char_width ) {
+                        shift_w = 0;
+                    }
+                }
+            }
+        }
+        if ( shift_w - rsb > usable_right_overflow )
+            shift_w = usable_right_overflow + rsb;
+        return shift_w;
+    }
+
     /// split line into words, add space for width alignment
     void addLine( int start, int end, int x, src_text_fragment_t * para, bool first,
             bool last, bool preFormattedOnly, bool isLastPara, bool hasInlineBoxes,
@@ -4385,8 +4496,6 @@ public:
                         // It feels we have to do it even for the first line with text-indent,
                         // as some page might have multiple consecutive single lines that can
                         // benefit from hanging so the margin looks clean too.
-                        int lsb = font->getLeftSideBearing(m_text[wstart]);
-                        int left_overflow = lsb < 0 ? -lsb : 0;
                         if ( fit_glyphs ) {
                             // We don't want any part of the glyph to overflow in the left margin.
                             // We correct only overflows - keeping underflows (so, not having
@@ -4398,54 +4507,13 @@ public:
                             // and so leak on the left. On the left, we were also correcting
                             // underflows, so fitting italic glyphs to the left edge - but we
                             // don't anymore as it doesn't really feel needed.)
-                            frmline->x += left_overflow; // so that the glyph's overflow is at original frmline->x
-                            // printf("%c lsb=%d\n", m_text[wstart], font->getLeftSideBearing(m_text[wstart]));
+                            int lsb = font->getLeftSideBearing(m_text[wstart]);
+                            if ( lsb < 0 )
+                                frmline->x += -lsb; // so that the glyph's overflow is at original frmline->x
                         }
                         else {
-                            // We prevent hanging punctuation on the common opening quotation marks
-                            // or dashes that we flagged with LCHAR_LOCKED_SPACING (most of these
-                            // are characters that can hang) - and on fully-pre lines and when
-                            // the font is monospace.
-                            // Note that some CJK fonts might have full-width glyphs for some of our
-                            // common hanging chars, but not for others, and this might look bad with
-                            // them, and different whether it is used as the main font or as a fallback.
-                            // (Noto Sans CJK SC has full-width glyphs for single or double quotation
-                            // marks (‘ ’ “ ”), but not for all our other hanging chars.)
-                            // Reducing CJK half-blank full-width glyphs's width should be handled
-                            // more generically elsewhere.
-                            // We try to avoid hanging these with some heuristic below.
-                            bool allow_hanging = !optimalLine && m_hanging_punctuation &&
-                                                 !preFormattedOnly &&
-                                                 !(m_flags[wstart] & LCHAR_LOCKED_SPACING) &&
-                                                 font->getFontFamily() != css_ff_monospace;
-                            int shift_x = 0;
-                            if ( allow_hanging ) {
-                                bool check_font;
-                                int percent = srcline->lang_cfg->getHangingPercent(false, m_para_dir_is_rtl, check_font, m_text, wstart, end-wstart-1);
-                                if ( percent && check_font && left_overflow > 0 ) {
-                                    // Some fonts might already have enough negative
-                                    // left side bearing for some chars, that would
-                                    // make them naturally hang on the left.
-                                    percent = 0;
-                                }
-                                if ( percent ) {
-                                    int first_char_width = m_widths[wstart] - (wstart>0 ? m_widths[wstart-1] : 0);
-                                    shift_x = first_char_width * percent / 100;
-                                    if ( shift_x == 0 ) // Force at least 1px if division rounded it to 0
-                                        shift_x = 1;
-                                    // Cancel it if this char looks like it might be full-width
-                                    // (0.9 * font size, in case HarfBuzz has reduced the advance)
-                                    // and it has a lot of positive left side bearing (left half
-                                    // of the glyph blank) - see above.
-                                    if ( first_char_width > 0.9 * font->getSize() && lsb > 0.4 * first_char_width ) {
-                                        shift_x = 0;
-                                    }
-                                }
-                            }
-                            if ( shift_x - lsb > usable_left_overflow ) {
-                                shift_x = usable_left_overflow + lsb;
-                            }
-                            frmline->x -= shift_x;
+                            frmline->x -= getLineStartHang(wstart, end, usable_left_overflow,
+                                                          !optimalLine && !preFormattedOnly);
                         }
                     }
 
@@ -4649,71 +4717,22 @@ public:
                                 break;
                             }
                         }
-                        bool ends_with_hyphen = m_flags[lastnonspace] & LCHAR_ALLOW_HYPH_WRAP_AFTER;
-                        int rsb = 0; // don't bother with hyphen rsb, which can't overflow
-                        int right_overflow = 0;
-                        if ( !ends_with_hyphen ) {
-                            rsb = font->getRightSideBearing(m_text[lastnonspace]);
-                            if ( rsb < 0 )
-                                right_overflow = -rsb;
-                        }
                         if ( fit_glyphs ) {
                             // We don't want any part of the glyph to overflow in the right margin.
                             // (We used to correct it only for italic fonts, where "J" or "f"
-                            // can have have huge negative overflow for their part above baseline
+                            // can have huge negative overflow for their part above baseline
                             // and so leak on the right. We were previously also correcting only
                             // overflows and not underflows.)
-                            word->width += right_overflow;
+                            // (don't bother with the hyphen rsb, which can't overflow)
+                            if ( !(m_flags[lastnonspace] & LCHAR_ALLOW_HYPH_WRAP_AFTER) ) {
+                                int rsb = font->getRightSideBearing(m_text[lastnonspace]);
+                                if ( rsb < 0 )
+                                    word->width += -rsb;
+                            }
                         }
                         else {
-                            // We prevent hanging punctuation in a few cases (see above)
-                            bool allow_hanging = !optimalLine && m_hanging_punctuation &&
-                                                 !preFormattedOnly &&
-                                                 font->getFontFamily() != css_ff_monospace;
-                            int shift_w = 0;
-                            if ( allow_hanging ) {
-                                if ( ends_with_hyphen ) {
-                                    int percent = srcline->lang_cfg->getHyphenHangingPercent();
-                                    if ( percent ) {
-                                        shift_w = font->getHyphenWidth() * percent / 100;
-                                        if ( shift_w == 0 ) // Force at least 1px if division rounded it to 0
-                                            shift_w = 1;
-                                    }
-                                    // Note: some part of text in bold or in a bigger font size inside
-                                    // a paragraph may stand out more than the regular text, and this
-                                    // is quite noticable with the hyphen.
-                                    // We might want to limit or force hyphen hanging to what it should
-                                    // be with the main paragraph font, but that might not work well in
-                                    // some situations.
-                                    // See https://github.com/koreader/crengine/pull/355#issuecomment-656760791
-                                }
-                                else {
-                                    bool check_font;
-                                    int percent = srcline->lang_cfg->getHangingPercent(true, m_para_dir_is_rtl, check_font, m_text, lastnonspace, end-lastnonspace-1);
-                                    if ( percent && check_font && right_overflow > 0 ) {
-                                        // Some fonts might already have enough negative
-                                        // right side bearing for some chars, that would
-                                        // make them naturally hang on the right.
-                                        percent = 0;
-                                    }
-                                    if ( percent ) {
-                                        int last_char_width = m_widths[lastnonspace] - (lastnonspace>0 ? m_widths[lastnonspace-1] : 0);
-                                        shift_w = last_char_width * percent / 100;
-                                        if ( shift_w == 0 ) // Force at least 1px if division rounded it to 0
-                                            shift_w = 1;
-                                        // Cancel it if this char looks like it might be full-width
-                                        // (0.9 * font size, in case HarfBuzz has reduced the advance)
-                                        // and it has a lot of positive right side bearing (right half
-                                        // of the glyph blank) - see comment above in 'firstWord' handling.
-                                        if ( last_char_width > 0.9 * font->getSize() && rsb > 0.4 * last_char_width ) {
-                                            shift_w = 0;
-                                        }
-                                    }
-                                }
-                            }
-                            if ( shift_w - rsb > usable_right_overflow ) {
-                                shift_w = usable_right_overflow + rsb;
-                            }
+                            int shift_w = getLineEndHang(lastnonspace, end, usable_right_overflow,
+                                                         !optimalLine && !preFormattedOnly);
                             word->width -= shift_w;
                             // This last word will overflow over frmline->width: remember it,
                             // so we can include it in the drawing of native text selection.
