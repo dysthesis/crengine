@@ -5073,8 +5073,9 @@ public:
                                 !(m_flags[breakPos+1] & LCHAR_IS_SPACE) ) {
                             shrink = getMaxCondensedSpaceTruncation(breakPos);
                         }
+                        // KP stretch is an additive allowance, not the final width.
                         KPItem glue = { KPItem::GLUE, width,
-                                        locked ? 0 : width * 3 / 2, shrink, 0,
+                                        locked ? 0 : width / 2, shrink, 0,
                                         false, breakPos };
                         if ( deprecatedBreak && hasBox ) {
                             KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
