@@ -23,6 +23,10 @@ struct KPItem {
     bool flagged;
     int pos;
     int adjustable;
+    // Width the line edge may protrude past the margin: on a BOX, when a line
+    // starts there; on a break, when a line ends there. Ignored by
+    // kp_break_paragraph().
+    int protrusion;
 };
 
 struct KPParams {
@@ -84,6 +88,9 @@ int kp_break_paragraph(const KPItem * items, int n_items,
  * The score is lexicographic: worst absolute ratio, adjacent-ratio variation,
  * total squared ratio, then break/hyphen demerits. Ordinary and discretionary
  * breakpoints must therefore be supplied together in one item list.
+ *
+ * Protrusion widens the target of the line that starts or ends at the item, so
+ * candidates are scored against the width they will actually be rendered to.
  *
  * Returns the line count, or -1 under the same conditions as
  * kp_break_paragraph(). Empty input returns zero.

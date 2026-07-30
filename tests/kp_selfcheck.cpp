@@ -25,20 +25,20 @@ struct Fit {
 
 KPItem box(int width)
 {
-    KPItem item = { KPItem::BOX, width, 0, 0, 0, false, 0, 0 };
+    KPItem item = { KPItem::BOX, width, 0, 0, 0, false, 0, 0, 0 };
     return item;
 }
 
 KPItem glue(int width, int stretch, int shrink)
 {
     KPItem item = { KPItem::GLUE, width, stretch, shrink, 0, false, 0,
-                    width };
+                    width, 0 };
     return item;
 }
 
 KPItem penalty(int width, int value, bool flagged = false)
 {
-    KPItem item = { KPItem::PENALTY, width, 0, 0, value, flagged, 0, 0 };
+    KPItem item = { KPItem::PENALTY, width, 0, 0, value, flagged, 0, 0, 0 };
     return item;
 }
 
@@ -307,8 +307,12 @@ SpacingOracleFit spacingLineFit(const std::vector<KPItem> & items,
     if (items[break_item].type == KPItem::PENALTY)
         natural += items[break_item].width;
 
+    std::int64_t target = line_width + items[break_item].protrusion;
+    if (start < break_item && items[start].type == KPItem::BOX)
+        target += items[start].protrusion;
+
     SpacingOracleFit result = { false, false, 0 };
-    std::int64_t shortfall = line_width - natural;
+    std::int64_t shortfall = target - natural;
     bool ragged = isRaggedBreak(items, break_item);
     if (shortfall == 0) {
         result.feasible = true;
@@ -842,6 +846,10 @@ void checkGeneratedSpacingOptimality()
             }
         }
         finishParagraph(items);
+        // Hanging punctuation is worth a small fraction of a glyph, and turns
+        // negative when a glyph overflows further than the margin allows.
+        for (std::size_t i = 0; i < items.size(); i++)
+            items[i].protrusion = draw(state, 5) - 1;
 
         KPSpacingParams params;
         params.double_hyphen_demerits = draw(state, 3) == 0 ? 0 : 10000;

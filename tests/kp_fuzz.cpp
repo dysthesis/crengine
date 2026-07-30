@@ -41,7 +41,12 @@ std::vector<KPItem> drawItems(FuzzedDataProvider & fdp)
     std::vector<KPItem> items;
     const int count = fdp.ConsumeIntegralInRange<int>(0, MAX_ITEMS);
     for (int i = 0; i < count && fdp.remaining_bytes() > 0; i++) {
-        KPItem item = { KPItem::BOX, 0, 0, 0, 0, false, i, 0 };
+        KPItem item = { KPItem::BOX, 0, 0, 0, 0, false, i, 0, 0 };
+        // Protrusion is signed: a glyph overflowing the margin more than the
+        // margin can absorb pulls the edge inwards.
+        item.protrusion = fdp.ConsumeBool()
+                ? fdp.ConsumeIntegralInRange<int>(-64, 64)
+                : fdp.ConsumeIntegralInRange<int>(INT_MIN, INT_MAX);
         switch (fdp.ConsumeIntegralInRange<int>(0, 2)) {
         case 0:
             item.width = drawSize(fdp);
@@ -68,9 +73,9 @@ std::vector<KPItem> drawItems(FuzzedDataProvider & fdp)
 // validation, so append it rather than hoping the fuzzer guesses it.
 void finishParagraph(std::vector<KPItem> & items)
 {
-    const KPItem no_break = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, 0, 0 };
-    const KPItem filler = { KPItem::GLUE, 0, 100000, 0, 0, false, 0, 0 };
-    const KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, 0, 0 };
+    const KPItem no_break = { KPItem::PENALTY, 0, 0, 0, KP_INFINITY, false, 0, 0, 0 };
+    const KPItem filler = { KPItem::GLUE, 0, 100000, 0, 0, false, 0, 0, 0 };
+    const KPItem forced = { KPItem::PENALTY, 0, 0, 0, -KP_INFINITY, false, 0, 0, 0 };
     items.push_back(no_break);
     items.push_back(filler);
     items.push_back(forced);

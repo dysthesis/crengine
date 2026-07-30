@@ -309,10 +309,10 @@ int ratioAwayFromZero(std::int64_t amount, std::int64_t adjustable,
 
 SpacingFit fitSpacingLine(std::int64_t natural, std::int64_t adjustable,
                           std::int64_t stretch, std::int64_t shrink,
-                          int target, bool ragged)
+                          std::int64_t target, bool ragged)
 {
     SpacingFit result = { 0, false, false, false };
-    std::int64_t shortfall = static_cast<std::int64_t>(target) - natural;
+    std::int64_t shortfall = target - natural;
     if (shortfall == 0) {
         result.feasible = true;
         result.has_ratio = !ragged;
@@ -390,8 +390,19 @@ void getSpacingMetrics(const std::vector<Totals> & prefix, int start,
         natural += item.width;
 }
 
+std::int64_t spacingTarget(const KPItem * items, int start, int break_item,
+                           int base)
+{
+    std::int64_t target = base;
+    // start may have scanned past break_item when the line holds no box.
+    if (start < break_item && items[start].type == KPItem::BOX)
+        target += items[start].protrusion;
+    return target + items[break_item].protrusion;
+}
+
 bool spacingPathExists(const KPItem * items, int n_items,
                        int first_line_width, int rest_width, int ratio_bound,
+                       std::int64_t protrusion_bound,
                        const std::vector<Totals> & prefix,
                        const std::vector<int> & next_nondiscardable)
 {
@@ -424,14 +435,18 @@ bool spacingPathExists(const KPItem * items, int n_items,
             std::int64_t shrink;
             getSpacingMetrics(prefix, start, break_item, item, natural,
                               adjustable, stretch, shrink);
-            int target = previous.line_count == 0 ? first_line_width
-                                                  : rest_width;
+            std::int64_t base = previous.line_count == 0 ? first_line_width
+                                                         : rest_width;
+            std::int64_t target = spacingTarget(items, start, break_item, base);
             SpacingFit fit = fitSpacingLine(natural, adjustable, stretch,
                                             shrink, target, ragged);
-            bool permanently_overfull = fit.overfull;
+            // Deactivation is only sound against the widest target any later
+            // break could still offer, so it assumes the best protrusion.
+            std::int64_t reach = base + protrusion_bound;
+            bool permanently_overfull = fitSpacingLine(natural, adjustable,
+                    stretch, shrink, reach, ragged).overfull;
             if (permanently_overfull && item.type == KPItem::PENALTY) {
-                permanently_overfull = natural - item.width >
-                        static_cast<std::int64_t>(target) + shrink;
+                permanently_overfull = natural - item.width > reach + shrink;
             }
             if (!forced && !permanently_overfull)
                 surviving.push_back(*it);
@@ -471,6 +486,7 @@ bool spacingPathExists(const KPItem * items, int n_items,
 
 int optimiseSpacingPath(const KPItem * items, int n_items,
                         int first_line_width, int rest_width, int ratio_bound,
+                        std::int64_t protrusion_bound,
                         const KPSpacingParams & params,
                         const std::vector<Totals> & prefix,
                         const std::vector<int> & next_nondiscardable,
@@ -507,14 +523,18 @@ int optimiseSpacingPath(const KPItem * items, int n_items,
             std::int64_t shrink;
             getSpacingMetrics(prefix, start, break_item, item, natural,
                               adjustable, stretch, shrink);
-            int target = previous.line_count == 0 ? first_line_width
-                                                  : rest_width;
+            std::int64_t base = previous.line_count == 0 ? first_line_width
+                                                         : rest_width;
+            std::int64_t target = spacingTarget(items, start, break_item, base);
             SpacingFit fit = fitSpacingLine(natural, adjustable, stretch,
                                             shrink, target, ragged);
-            bool permanently_overfull = fit.overfull;
+            // Deactivation is only sound against the widest target any later
+            // break could still offer, so it assumes the best protrusion.
+            std::int64_t reach = base + protrusion_bound;
+            bool permanently_overfull = fitSpacingLine(natural, adjustable,
+                    stretch, shrink, reach, ragged).overfull;
             if (permanently_overfull && item.type == KPItem::PENALTY) {
-                permanently_overfull = natural - item.width >
-                        static_cast<std::int64_t>(target) + shrink;
+                permanently_overfull = natural - item.width > reach + shrink;
             }
             if (!forced && !permanently_overfull)
                 surviving.push_back(previous_index);
@@ -760,15 +780,26 @@ int kp_break_paragraph_spacing(const KPItem * items, int n_items,
             next_nondiscardable[i] = next_nondiscardable[i + 1];
     }
 
+    // A line's target is its base width plus at most the best protrusion at
+    // each of its two edges.
+    std::int64_t protrusion_bound = 0;
+    for (int i = 0; i < n_items; i++) {
+        if (items[i].protrusion > protrusion_bound)
+            protrusion_bound = items[i].protrusion;
+    }
+    protrusion_bound *= 2;
+
     if (!spacingPathExists(items, n_items, first_line_width, rest_width,
-                           KP_RATIO_SCALE, prefix, next_nondiscardable))
+                           KP_RATIO_SCALE, protrusion_bound, prefix,
+                           next_nondiscardable))
         return -1;
     int lower = 0;
     int upper = KP_RATIO_SCALE;
     while (lower < upper) {
         int middle = lower + (upper - lower) / 2;
         if (spacingPathExists(items, n_items, first_line_width, rest_width,
-                              middle, prefix, next_nondiscardable))
+                              middle, protrusion_bound, prefix,
+                              next_nondiscardable))
             upper = middle;
         else
             lower = middle + 1;
@@ -776,7 +807,7 @@ int kp_break_paragraph_spacing(const KPItem * items, int n_items,
 
     std::vector<SpacingNode> nodes;
     int best = optimiseSpacingPath(items, n_items, first_line_width, rest_width,
-                                   lower, params, prefix,
+                                   lower, protrusion_bound, params, prefix,
                                    next_nondiscardable, nodes);
     if (best < 0)
         return -1;
