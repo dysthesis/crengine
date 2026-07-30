@@ -413,6 +413,12 @@ void LFormattedText::AddSourceObject(
 
 class LVFormatter {
 public:
+    struct OptimalLineDecision {
+        int wrap_pos;
+        int ratio_x1000;
+        bool adjust_spacing;
+    };
+
     //LVArray<lUInt16>  widths_buf;
     //LVArray<lUInt8>   flags_buf;
     formatted_text_fragment_t * m_pbuffer;
@@ -2747,8 +2753,80 @@ public:
 #define MIN_WORD_LEN_TO_HYPHENATE 4
 #define MAX_WORD_SIZE 64
 
+    bool applyOptimalWordSpacing(formatted_line_t * frmline,
+            const std::vector<int> & naturalSpaceWidths, int extraWidth) {
+        if ( (int)naturalSpaceWidths.size() != frmline->word_count )
+            return false;
+        if ( extraWidth == 0 )
+            return true;
+
+        bool expand = extraWidth > 0;
+        int amount = expand ? extraWidth : -extraWidth;
+        lInt64 totalNatural = 0;
+        lInt64 totalCapacity = 0;
+        std::vector<int> capacities(frmline->word_count, 0);
+        for ( int i=0; i<frmline->word_count; i++ ) {
+            int natural = naturalSpaceWidths[i];
+            if ( natural <= 0 )
+                continue;
+            int capacity = expand ? natural / 2
+                                  : frmline->words[i].width - frmline->words[i].min_width;
+            if ( capacity < 0 )
+                capacity = 0;
+            capacities[i] = capacity;
+            totalNatural += natural;
+            totalCapacity += capacity;
+        }
+        if ( totalNatural <= 0 || amount > totalCapacity )
+            return false;
+
+        std::vector<int> adjustments(frmline->word_count, 0);
+        int applied = 0;
+        for ( int i=0; i<frmline->word_count; i++ ) {
+            int natural = naturalSpaceWidths[i];
+            if ( natural <= 0 )
+                continue;
+            int adjustment = (int)((lInt64)amount * natural / totalNatural);
+            if ( adjustment > capacities[i] )
+                adjustment = capacities[i];
+            adjustments[i] = adjustment;
+            applied += adjustment;
+        }
+        // simplification: scan once per remaining pixel; replace with sorted
+        // capped apportionment if line-width-bounded work ever shows in profiles.
+        while ( applied < amount ) {
+            int best = -1;
+            lInt64 bestDeficit = 0;
+            for ( int i=0; i<frmline->word_count; i++ ) {
+                if ( adjustments[i] >= capacities[i] )
+                    continue;
+                lInt64 deficit = (lInt64)amount * naturalSpaceWidths[i] -
+                        (lInt64)adjustments[i] * totalNatural;
+                if ( best < 0 || deficit > bestDeficit ) {
+                    best = i;
+                    bestDeficit = deficit;
+                }
+            }
+            if ( best < 0 )
+                return false;
+            adjustments[best]++;
+            applied++;
+        }
+
+        int direction = expand ? 1 : -1;
+        int shift = 0;
+        for ( int i=0; i<frmline->word_count; i++ ) {
+            frmline->words[i].x += direction * shift;
+            shift += adjustments[i];
+        }
+        frmline->width += direction * shift;
+        return true;
+    }
+
     /// align line: add or reduce widths of spaces to achieve desired text alignment
-    void alignLine( formatted_line_t * frmline, int alignment, int rightIndent=0, bool hasInlineBoxes=false ) {
+    void alignLine( formatted_line_t * frmline, int alignment, int rightIndent=0,
+            bool hasInlineBoxes=false, const OptimalLineDecision * optimalLine=NULL,
+            const std::vector<int> * naturalSpaceWidths=NULL ) {
         // Fetch current line x offset and max width
         int x_offset;
         int width = getAvailableWidthAtY(m_y, m_pbuffer->strut_height, x_offset);
@@ -2778,7 +2856,7 @@ public:
         int additional_extra_width = 0; // additional extra width we could get from the allowed spaces condensing
         int over_extra_width = 0; // even more extra width we could get from even more spaces condensing
         int correction_needed_width = 0;
-        for ( int i=0; i<(int)frmline->word_count; i++ ) {
+        for ( int i=0; !optimalLine && i<(int)frmline->word_count; i++ ) {
             formatted_word_t * word = &frmline->words[i];
             // We will store some computations in these temporary slots (that are not used anymore)
             word->_top_to_baseline = 0; // correction needed
@@ -2967,7 +3045,7 @@ public:
 
         // We might want to prevent this when LangCfg == "de" (in german,
         // letter spacing is used for emphasis)
-        if ( m_pbuffer->max_added_letter_spacing_percent > 0 // only if allowed
+        if ( !optimalLine && m_pbuffer->max_added_letter_spacing_percent > 0 // only if allowed
                         && alignment == LTEXT_ALIGN_WIDTH    // only when justifying
                         && frmline->word_count > 1           // not if single word (expanded, but not taking the full width is ugly)
                         && 100 * extra_width > m_pbuffer->unused_space_threshold_percent * usable_width ) {
@@ -3105,7 +3183,16 @@ public:
             }
         }
 
-        if ( extra_width < 0 ) {
+        bool optimalSpacingRequested = optimalLine && optimalLine->adjust_spacing &&
+                naturalSpaceWidths;
+        if ( optimalSpacingRequested ) {
+            // Never replace a scored line with legacy unbounded/equal spacing.
+            if ( !applyOptimalWordSpacing(frmline, *naturalSpaceWidths, extra_width) )
+                CRLog::error("Optimal spacing capacity mismatch: ratio=%d residual=%d",
+                        optimalLine->ratio_x1000, extra_width);
+            extra_width = usable_width - frmline->width;
+        }
+        else if ( extra_width < 0 ) {
             // line is too wide
             // reduce spaces to fit line
             int extraSpace = -extra_width;
@@ -3318,7 +3405,9 @@ public:
     }
 
     /// split line into words, add space for width alignment
-    void addLine( int start, int end, int x, src_text_fragment_t * para, bool first, bool last, bool preFormattedOnly, bool isLastPara, bool hasInlineBoxes )
+    void addLine( int start, int end, int x, src_text_fragment_t * para, bool first,
+            bool last, bool preFormattedOnly, bool isLastPara, bool hasInlineBoxes,
+            const OptimalLineDecision * optimalLine=NULL )
     {
         // No need to do some x-alignment work if light formatting, when we
         // are only interested in computing block height and positioning
@@ -3403,6 +3492,12 @@ public:
         // Override it for PRE lines (or in case align has not been set)
         if ( preFormattedOnly || !align )
             align = m_para_dir_is_rtl ? LTEXT_ALIGN_RIGHT : LTEXT_ALIGN_LEFT;
+        if ( optimalLine && !optimalLine->adjust_spacing && !last )
+            align = m_para_dir_is_rtl ? LTEXT_ALIGN_RIGHT : LTEXT_ALIGN_LEFT;
+
+        std::vector<int> naturalSpaceWidths;
+        if ( optimalLine )
+            naturalSpaceWidths.reserve(end - start);
 
         // single initial-letter word on the logical first line, if any
         int initial_letter_word_index = -1;
@@ -3930,6 +4025,8 @@ public:
 
                 // Create/add a new word to this frmline
                 formatted_word_t * word = lvtextAddFormattedWord(frmline);
+                if ( optimalLine )
+                    naturalSpaceWidths.push_back(0);
                 src_text_fragment_t * srcline = m_srcs[wstart]; // should be identical to lastSrc
                 word->src_text_index = srcline->index;
 
@@ -4317,7 +4414,7 @@ public:
                             // Reducing CJK half-blank full-width glyphs's width should be handled
                             // more generically elsewhere.
                             // We try to avoid hanging these with some heuristic below.
-                            bool allow_hanging = m_hanging_punctuation &&
+                            bool allow_hanging = !optimalLine && m_hanging_punctuation &&
                                                  !preFormattedOnly &&
                                                  !(m_flags[wstart] & LCHAR_LOCKED_SPACING) &&
                                                  font->getFontFamily() != css_ff_monospace;
@@ -4359,6 +4456,14 @@ public:
                     // Set and adjust word natural width (and min_width which might be used in alignLine())
                     word->width = m_widths[i>0 ? i-1 : 0] - (wstart>0 ? m_widths[wstart-1] : 0);
                     word->min_width = word->width;
+                    if ( optimalLine ) {
+                        for ( int j=wstart; j<i; j++ ) {
+                            if ( m_flags[j] & LCHAR_IS_ADJUSTABLE_SPACE )
+                                naturalSpaceWidths.back() += m_widths[j] -
+                                        (j > start ? m_widths[j-1] :
+                                                     (start > 0 ? m_widths[start-1] : 0));
+                        }
+                    }
                     TR("addLine - word(%d, %d) x=%d (%d..%d)[%d] |%s|", wstart, i, frmline->width, wstart>0 ? m_widths[wstart-1] : 0, m_widths[i-1], word->width, LCSTR(lString32(m_text+wstart, i-wstart)));
                     if ( m_flags[wstart] & LCHAR_IS_CLUSTER_TAIL ) {
                         // The start of this word is part of a ligature that started
@@ -4416,6 +4521,8 @@ public:
                             // lose any trailing space)
                             word->width = m_widths[i>1 ? i-2 : 0] - (wstart>0 ? m_widths[wstart-1] : 0);
                             word->min_width = word->width;
+                            if ( optimalLine )
+                                naturalSpaceWidths.back() = 0;
                         }
                     }
                     else if ( !firstWord && m_flags[wstart] & LCHAR_IS_SPACE ) {
@@ -4560,7 +4667,7 @@ public:
                         }
                         else {
                             // We prevent hanging punctuation in a few cases (see above)
-                            bool allow_hanging = m_hanging_punctuation &&
+                            bool allow_hanging = !optimalLine && m_hanging_punctuation &&
                                                  !preFormattedOnly &&
                                                  font->getFontFamily() != css_ff_monospace;
                             int shift_w = 0;
@@ -4868,7 +4975,8 @@ public:
 
         if ( !light_formatting ) {
             // Fix up words position and width to ensure requested alignment and indent
-            alignLine( frmline, align, rightIndent, hasInlineBoxes );
+            alignLine( frmline, align, rightIndent, hasInlineBoxes, optimalLine,
+                    optimalLine ? &naturalSpaceWidths : NULL );
         }
 
         if ( initial_letter_word_index >= 0 ) {
@@ -4944,6 +5052,8 @@ public:
         if ( m_length <= 0 || preFormattedOnly || m_has_cjk || m_has_float_to_position ||
                 m_has_ongoing_float || m_initial_letter_exclusion.active ||
                 (para->flags & LTEXT_FLAG_NEWLINE) != LTEXT_ALIGN_WIDTH ||
+                ((para->flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) & LTEXT_FLAG_NEWLINE) ==
+                    LTEXT_ALIGN_WIDTH ||
                 getCurrentLineWidth() != m_pbuffer->width ) {
             return false;
         }
@@ -4953,7 +5063,7 @@ public:
             src_text_fragment_t * src = &m_pbuffer->srctext[i];
             if ( !(src->flags & LTEXT_FLAG_PREFORMATTED) )
                 allPreformatted = false;
-            if ( src->flags & LTEXT_IS_FIRST_LINE_CLONE )
+            if ( src->flags & (LTEXT_IS_FIRST_LINE_CLONE|LTEXT_FIT_GLYPHS) )
                 return false;
             if ( src->flags & LTEXT_SRC_IS_OBJECT ) {
                 if ( src->o.objflags & LTEXT_OBJECT_IS_FLOAT )
@@ -5001,6 +5111,8 @@ public:
             const std::vector<int> & hyphenWidths, int fillStretch,
             std::vector<KPItem> & items) {
         const int deprecatedPenalty = 5000;
+        for ( int j=0; j<m_length; j++ )
+            m_flags[j] &= ~LCHAR_IS_ADJUSTABLE_SPACE;
         items.clear();
         items.reserve(m_length * 2 + 3);
         bool hasBox = false;
@@ -5039,52 +5151,66 @@ public:
                     breakPos = deprecatedBreakPos;
                     deprecatedBreak = breakPos >= 0;
                 }
-                if ( breakPos >= 0 ) {
+                int spaceEnd = breakPos >= 0 ? breakPos + 1 : runEnd;
+                bool preformatted = false;
+                bool locked = false;
+                for ( int j=i; j<spaceEnd; j++ ) {
+                    preformatted = preformatted ||
+                            (m_srcs[j]->flags & LTEXT_FLAG_PREFORMATTED);
+                    locked = locked || (m_flags[j] & LCHAR_LOCKED_SPACING);
+                }
+                if ( breakPos >= 0 || !preformatted ) {
                     if ( i > boxStart ) {
                         addOptimalBox(items, boxStart, i);
                         hasBox = true;
                     }
-                    bool preformatted = false;
-                    bool locked = false;
-                    for ( int j=i; j<=breakPos; j++ ) {
-                        preformatted = preformatted ||
-                                (m_srcs[j]->flags & LTEXT_FLAG_PREFORMATTED);
-                        locked = locked || (m_flags[j] & LCHAR_LOCKED_SPACING);
-                    }
                     if ( preformatted ) {
-                        addOptimalBox(items, i, breakPos+1);
+                        addOptimalBox(items, i, spaceEnd);
                         hasBox = true;
                         KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
                                            deprecatedBreak ? deprecatedPenalty : 0,
                                            false, breakPos, 0 };
                         items.push_back(penalty);
                     }
+                    else if ( spaceEnd == m_length ) {
+                        // addLine() discards trailing non-preformatted spaces too.
+                    }
                     else {
-                        if ( hasBox && items.back().type != KPItem::BOX ) {
+                        if ( breakPos >= 0 && !deprecatedBreak && hasBox &&
+                                items.back().type != KPItem::BOX ) {
                             KPItem empty = { KPItem::BOX, 0, 0, 0, 0, false,
-                                             breakPos, 0 };
+                                             spaceEnd-1, 0 };
                             items.push_back(empty);
                         }
-                        int width = getOptimalRangeWidth(i, breakPos+1);
+                        int width = getOptimalRangeWidth(i, spaceEnd);
                         int shrink = 0;
                         if ( !locked &&
                                 m_pbuffer->min_space_condensing_percent != 100 &&
-                                breakPos < m_length-1 &&
-                                !(m_flags[breakPos+1] & LCHAR_IS_SPACE) ) {
-                            shrink = getMaxCondensedSpaceTruncation(breakPos);
+                                spaceEnd < m_length &&
+                                !(m_flags[spaceEnd] & LCHAR_IS_SPACE) ) {
+                            shrink = getMaxCondensedSpaceTruncation(spaceEnd-1);
                         }
                         // KP stretch is an additive allowance, not the final width.
                         KPItem glue = { KPItem::GLUE, width,
                                         locked ? 0 : width / 2, shrink, 0,
-                                        false, breakPos, locked ? 0 : width };
-                        if ( deprecatedBreak && hasBox ) {
+                                        false, spaceEnd-1, locked ? 0 : width };
+                        if ( !locked ) {
+                            for ( int j=i; j<spaceEnd; j++ )
+                                m_flags[j] |= LCHAR_IS_ADJUSTABLE_SPACE;
+                        }
+                        if ( deprecatedBreak ) {
                             KPItem penalty = { KPItem::PENALTY, 0, 0, 0,
                                                deprecatedPenalty, false, breakPos, 0 };
                             items.push_back(penalty);
                         }
+                        else if ( breakPos < 0 ) {
+                            KPItem blocker = { KPItem::PENALTY, 0, 0, 0,
+                                               KP_INFINITY, false, spaceEnd-1, 0 };
+                            items.push_back(blocker);
+                        }
                         items.push_back(glue);
                     }
-                    boxStart = breakPos + 1;
+                    boxStart = spaceEnd;
                     i = boxStart;
                     continue;
                 }
@@ -5196,26 +5322,23 @@ public:
                     m_flags[pos] &= ~LCHAR_ALLOW_HYPH_WRAP_AFTER;
                 }
                 else {
-                    hyphenWidths[pos] = hyphenWidth;
+                    hyphenWidths[pos] = ((LVFont *)candidateSource->t.font)->getHyphenWidth();
                 }
             }
             wordpos = wstart - 1;
         }
     }
 
-    bool runOptimalBreakPass(bool includeHyphenation, bool includeDeprecatedWraps,
+    bool runOptimalBreakPass(bool includeDeprecatedWraps,
             const std::vector<int> & hyphenWidths, int firstWidth,
-            int restWidth, int tolerance, int emergencyStretch,
-            std::vector<int> & breaks) {
+            int restWidth, std::vector<OptimalLineDecision> & breaks) {
         std::vector<KPItem> items;
         int fillStretch = firstWidth > restWidth ? firstWidth : restWidth;
-        buildOptimalItems(includeHyphenation, includeDeprecatedWraps,
+        buildOptimalItems(true, includeDeprecatedWraps,
                           hyphenWidths, fillStretch, items);
         std::vector<KPLine> lines(m_length + 1);
-        KPParams params;
-        params.tolerance = tolerance;
-        params.emergency_stretch = emergencyStretch;
-        int lineCount = kp_break_paragraph(&items[0], (int)items.size(),
+        KPSpacingParams params;
+        int lineCount = kp_break_paragraph_spacing(&items[0], (int)items.size(),
                 firstWidth, restWidth, params, &lines[0], (int)lines.size());
         if ( lineCount <= 0 )
             return false;
@@ -5230,14 +5353,24 @@ public:
             int breakPos = items[itemIndex].pos;
             if ( breakPos <= previous || breakPos >= m_length )
                 return false;
-            breaks.push_back(breakPos);
+            bool ragged = itemIndex >= 2 &&
+                    items[itemIndex].type == KPItem::PENALTY &&
+                    items[itemIndex].penalty <= -KP_INFINITY &&
+                    items[itemIndex-2].type == KPItem::PENALTY &&
+                    items[itemIndex-2].penalty >= KP_INFINITY &&
+                    items[itemIndex-1].type == KPItem::GLUE &&
+                    items[itemIndex-1].width == 0 &&
+                    items[itemIndex-1].adjustable == 0;
+            OptimalLineDecision decision = { breakPos, lines[i].ratio_x1000,
+                    !ragged || lines[i].ratio_x1000 < 0 };
+            breaks.push_back(decision);
             previous = breakPos;
         }
-        return !breaks.empty() && breaks.back() == m_length-1;
+        return !breaks.empty() && breaks.back().wrap_pos == m_length-1;
     }
 
     bool findOptimalBreaks(src_text_fragment_t * para,
-            std::vector<int> & breaks) {
+            std::vector<OptimalLineDecision> & breaks) {
         int firstIndent;
         int restIndent;
         if ( para->flags & LTEXT_LEGACY_RENDERING ) {
@@ -5259,30 +5392,24 @@ public:
 
         clearOptimalHyphenationFlags();
         std::vector<int> hyphenWidths(m_length, 0);
-        if ( runOptimalBreakPass(false, false, hyphenWidths, firstWidth, restWidth,
-                                 100, 0, breaks) ) {
-            return true;
-        }
-
         hyphenateOptimalCandidates(hyphenWidths);
-        bool found = runOptimalBreakPass(true, false, hyphenWidths, firstWidth,
-                                         restWidth, 200, 0, breaks);
-        if ( !found && m_pbuffer->strut_height > 0 ) {
-            // simplification: strut height approximates 1 em; use the block
-            // font size here if exact CSS ems become necessary.
-            found = runOptimalBreakPass(true, true, hyphenWidths, firstWidth,
-                    restWidth, 200, 3 * m_pbuffer->strut_height, breaks);
-        }
+        bool found = runOptimalBreakPass(false, hyphenWidths, firstWidth,
+                                         restWidth, breaks);
+        if ( !found )
+            found = runOptimalBreakPass(true, hyphenWidths, firstWidth,
+                                        restWidth, breaks);
         if ( !found ) {
             clearOptimalHyphenationFlags();
+            for ( int i=0; i<m_length; i++ )
+                m_flags[i] &= ~LCHAR_IS_ADJUSTABLE_SPACE;
             return false;
         }
 
         std::vector<int> chosenHyphens;
-        for ( std::vector<int>::const_iterator it=breaks.begin();
+        for ( std::vector<OptimalLineDecision>::const_iterator it=breaks.begin();
                 it!=breaks.end(); ++it ) {
-            if ( m_flags[*it] & LCHAR_ALLOW_HYPH_WRAP_AFTER )
-                chosenHyphens.push_back(*it);
+            if ( m_flags[it->wrap_pos] & LCHAR_ALLOW_HYPH_WRAP_AFTER )
+                chosenHyphens.push_back(it->wrap_pos);
         }
         clearOptimalHyphenationFlags();
         for ( std::vector<int>::const_iterator it=chosenHyphens.begin();
@@ -5292,13 +5419,13 @@ public:
         return true;
     }
 
-    void addOptimalLines(const std::vector<int> & breaks,
+    void addOptimalLines(const std::vector<OptimalLineDecision> & breaks,
             src_text_fragment_t * para, bool preFormattedOnly,
             bool isLastPara) {
         int pos = 0;
-        for ( std::vector<int>::const_iterator it=breaks.begin();
+        for ( std::vector<OptimalLineDecision>::const_iterator it=breaks.begin();
                 it!=breaks.end(); ++it ) {
-            int wrapPos = *it;
+            int wrapPos = it->wrap_pos;
             int x;
             if ( para->flags & LTEXT_LEGACY_RENDERING ) {
                 x = para->indent > 0 ? (pos == 0 ? para->indent : 0)
@@ -5325,7 +5452,7 @@ public:
             }
             addLine(pos, endp, x, para, pos == 0,
                     wrapPos >= m_length-1, preFormattedOnly, isLastPara,
-                    hasInlineBoxes);
+                    hasInlineBoxes, &*it);
             pos = wrapPos + 1;
 
             #if (USE_LIBUNIBREAK==1)
@@ -5375,7 +5502,7 @@ public:
             preFormattedOnly = preFormattedOnly && lfFound;
         }
 
-        std::vector<int> optimalBreaks;
+        std::vector<OptimalLineDecision> optimalBreaks;
         if ( m_pbuffer->optimal_line_breaking &&
                 canUseOptimalLineBreaking(start, end, para, preFormattedOnly) &&
                 findOptimalBreaks(para, optimalBreaks) ) {

@@ -252,7 +252,7 @@ lUInt16 lvfontMeasureText( const lvfont_handle pfont,
 #define LCHAR_IS_CJK                 0x1000 ///< flag: this char is CJK
 #define LCHAR_IS_FLEXIBLE_WIDTH_CJK  0x2000 ///< flag: this char is a CJK fullwidth char that can have its
                                             ///        nominal width modified (mostly small punctuation)
-#define LCHAR__AVAILABLE_BIT_15__    0x4000
+#define LCHAR_IS_ADJUSTABLE_SPACE    0x4000 ///< flag: space represented as adjustable glue by optimal line breaking
 #define LCHAR__AVAILABLE_BIT_16__    0x8000
 
 
