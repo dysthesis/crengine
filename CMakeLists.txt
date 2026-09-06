@@ -6,6 +6,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "build type")
 endif()
 option(BUILD_SHARED_LIBS "build a shared library" ON)
+option(KP_FORMATTER_TRACE "build the formatter trace collector" OFF)
 
 project(koreader LANGUAGES C CXX)
 
@@ -276,6 +277,17 @@ endif()
 target_include_directories(crengine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(crengine PUBLIC crengine/include)
 target_link_libraries(crengine PRIVATE ${CRE_LIBS})
+
+if(KP_FORMATTER_TRACE)
+    target_compile_definitions(crengine PUBLIC CR_KP_FORMATTER_TRACE=1)
+    target_compile_options(crengine PUBLIC -include ${CMAKE_CURRENT_BINARY_DIR}/crsetup.h)
+    add_executable(kp_formatter_trace tests/kp_formatter_trace.cpp)
+    target_compile_features(kp_formatter_trace PRIVATE cxx_std_17)
+    target_compile_options(kp_formatter_trace PRIVATE -Wall)
+    target_include_directories(kp_formatter_trace PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR} crengine/include)
+    target_link_libraries(kp_formatter_trace PRIVATE crengine ${CRE_LIBS})
+endif()
 
 # }}}
 

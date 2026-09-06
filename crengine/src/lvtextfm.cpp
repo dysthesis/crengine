@@ -419,6 +419,9 @@ public:
         int hang_left;
         int hang_right;
         bool adjust_spacing;
+        #if defined(CR_KP_FORMATTER_TRACE)
+        bool ragged;
+        #endif
     };
 
     //LVArray<lUInt16>  widths_buf;
@@ -476,6 +479,25 @@ public:
         int end_y;
     } m_initial_letter_exclusion;
 
+    #if defined(CR_KP_FORMATTER_TRACE)
+    int m_trace_paragraph_start;
+    int m_trace_paragraph_end;
+
+    KPFormatterTraceEvent traceEvent(KPFormatterTraceEventKind kind) {
+        KPFormatterTraceEvent event = {};
+        event.kind = kind;
+        event.paragraph_start = m_trace_paragraph_start;
+        event.paragraph_end = m_trace_paragraph_end;
+        event.line_index = -1;
+        return event;
+    }
+
+    void emitTrace(const KPFormatterTraceEvent & event) {
+        if ( m_pbuffer->kp_trace_callback )
+            m_pbuffer->kp_trace_callback(&event, m_pbuffer->kp_trace_userdata);
+    }
+    #endif
+
 // These are not unicode codepoints: these values are put where we
 // store text indexes in the source text node.
 // So, when checking for these, also checks for m_flags[i] & LCHAR_IS_OBJECT.
@@ -523,6 +545,10 @@ public:
         m_cjk_prev_line_added_space_div = 0;
         m_cjk_prev_line_added_space_mod = 0;
         m_specified_para_dir = REND_DIRECTION_UNSET;
+        #if defined(CR_KP_FORMATTER_TRACE)
+            m_trace_paragraph_start = 0;
+            m_trace_paragraph_end = 0;
+        #endif
         #if (USE_FRIBIDI==1)
             m_bidi_ctypes = NULL;
             m_bidi_btypes = NULL;
@@ -2757,10 +2783,43 @@ public:
 
     bool applyOptimalWordSpacing(formatted_line_t * frmline,
             const std::vector<int> & naturalSpaceWidths, int extraWidth) {
-        if ( (int)naturalSpaceWidths.size() != frmline->word_count )
+        #if defined(CR_KP_FORMATTER_TRACE)
+        KPFormatterTraceEvent trace = traceEvent(KP_TRACE_ALLOCATION);
+        trace.line_index = m_pbuffer->frmlinecount - 1;
+        trace.requested_adjustment = extraWidth;
+        trace.space_count = frmline->word_count;
+        std::vector<int> originalPositions(frmline->word_count, 0);
+        std::vector<int> originalWidths(frmline->word_count, 0);
+        for ( int i=0; i<frmline->word_count; i++ ) {
+            originalPositions[i] = frmline->words[i].x;
+            originalWidths[i] = frmline->words[i].width;
+        }
+        trace.word_x = originalPositions.empty() ? NULL : &originalPositions[0];
+        trace.word_widths = originalWidths.empty() ? NULL : &originalWidths[0];
+        #endif
+        if ( (int)naturalSpaceWidths.size() != frmline->word_count ) {
+            #if defined(CR_KP_FORMATTER_TRACE)
+            trace.reason = KP_TRACE_REASON_SPACE_COUNT;
+            trace.final_residual = extraWidth;
+            emitTrace(trace);
+            #endif
             return false;
-        if ( extraWidth == 0 )
+        }
+        if ( extraWidth == 0 ) {
+            #if defined(CR_KP_FORMATTER_TRACE)
+            std::vector<int> capacities(frmline->word_count, 0);
+            std::vector<int> adjustments(frmline->word_count, 0);
+            for ( int i=0; i<frmline->word_count; i++ ) {
+                capacities[i] = naturalSpaceWidths[i] / 2;
+            }
+            trace.success = true;
+            trace.natural_spaces = naturalSpaceWidths.empty() ? NULL : &naturalSpaceWidths[0];
+            trace.capacities = capacities.empty() ? NULL : &capacities[0];
+            trace.adjustments = adjustments.empty() ? NULL : &adjustments[0];
+            emitTrace(trace);
+            #endif
             return true;
+        }
 
         bool expand = extraWidth > 0;
         int amount = expand ? extraWidth : -extraWidth;
@@ -2779,8 +2838,17 @@ public:
             totalNatural += natural;
             totalCapacity += capacity;
         }
-        if ( totalNatural <= 0 || amount > totalCapacity )
+        if ( totalNatural <= 0 || amount > totalCapacity ) {
+            #if defined(CR_KP_FORMATTER_TRACE)
+            trace.reason = totalNatural <= 0 ? KP_TRACE_REASON_NO_ADJUSTABLE_SPACE :
+                                               KP_TRACE_REASON_INSUFFICIENT_CAPACITY;
+            trace.capacities = capacities.empty() ? NULL : &capacities[0];
+            trace.natural_spaces = naturalSpaceWidths.empty() ? NULL : &naturalSpaceWidths[0];
+            trace.final_residual = extraWidth;
+            emitTrace(trace);
+            #endif
             return false;
+        }
 
         std::vector<int> adjustments(frmline->word_count, 0);
         int applied = 0;
@@ -2809,8 +2877,17 @@ public:
                     bestDeficit = deficit;
                 }
             }
-            if ( best < 0 )
+            if ( best < 0 ) {
+                #if defined(CR_KP_FORMATTER_TRACE)
+                trace.reason = KP_TRACE_REASON_APPORTIONMENT;
+                trace.capacities = capacities.empty() ? NULL : &capacities[0];
+                trace.natural_spaces = naturalSpaceWidths.empty() ? NULL : &naturalSpaceWidths[0];
+                trace.applied_adjustment = 0;
+                trace.final_residual = extraWidth;
+                emitTrace(trace);
+                #endif
                 return false;
+            }
             adjustments[best]++;
             applied++;
         }
@@ -2822,8 +2899,55 @@ public:
             shift += adjustments[i];
         }
         frmline->width += direction * shift;
+        #if defined(CR_KP_FORMATTER_TRACE)
+        std::vector<int> signedAdjustments(adjustments);
+        std::vector<int> positions(frmline->word_count);
+        for ( int i=0; i<frmline->word_count; i++ ) {
+            signedAdjustments[i] *= direction;
+            positions[i] = frmline->words[i].x;
+        }
+        trace.success = true;
+        trace.natural_spaces = naturalSpaceWidths.empty() ? NULL : &naturalSpaceWidths[0];
+        trace.capacities = capacities.empty() ? NULL : &capacities[0];
+        trace.adjustments = signedAdjustments.empty() ? NULL : &signedAdjustments[0];
+        trace.word_x = positions.empty() ? NULL : &positions[0];
+        trace.applied_adjustment = direction * shift;
+        trace.final_residual = extraWidth - trace.applied_adjustment;
+        emitTrace(trace);
+        #endif
         return true;
     }
+
+    #if defined(CR_KP_FORMATTER_TRACE)
+    void traceUnadjustedOptimalSpacing(formatted_line_t * frmline,
+            const std::vector<int> & naturalSpaceWidths, int residual) {
+        std::vector<int> capacities(frmline->word_count, 0);
+        std::vector<int> adjustments(frmline->word_count, 0);
+        std::vector<int> positions(frmline->word_count, 0);
+        std::vector<int> widths(frmline->word_count, 0);
+        for ( int i=0; i<frmline->word_count; i++ ) {
+            int natural = i < (int)naturalSpaceWidths.size() ? naturalSpaceWidths[i] : 0;
+            capacities[i] = residual >= 0 ? natural / 2 :
+                    frmline->words[i].width - frmline->words[i].min_width;
+            if ( capacities[i] < 0 )
+                capacities[i] = 0;
+            positions[i] = frmline->words[i].x;
+            widths[i] = frmline->words[i].width;
+        }
+        KPFormatterTraceEvent event = traceEvent(KP_TRACE_ALLOCATION);
+        event.success = true;
+        event.line_index = m_pbuffer->frmlinecount - 1;
+        event.requested_adjustment = residual;
+        event.final_residual = residual;
+        event.natural_spaces = naturalSpaceWidths.empty() ? NULL : &naturalSpaceWidths[0];
+        event.capacities = capacities.empty() ? NULL : &capacities[0];
+        event.adjustments = adjustments.empty() ? NULL : &adjustments[0];
+        event.word_x = positions.empty() ? NULL : &positions[0];
+        event.word_widths = widths.empty() ? NULL : &widths[0];
+        event.space_count = frmline->word_count;
+        emitTrace(event);
+    }
+    #endif
 
     /// align line: add or reduce widths of spaces to achieve desired text alignment
     void alignLine( formatted_line_t * frmline, int alignment, int rightIndent=0,
@@ -3187,6 +3311,10 @@ public:
 
         bool optimalSpacingRequested = optimalLine && optimalLine->adjust_spacing &&
                 naturalSpaceWidths;
+        #if defined(CR_KP_FORMATTER_TRACE)
+        if ( optimalLine && !optimalSpacingRequested && naturalSpaceWidths )
+            traceUnadjustedOptimalSpacing(frmline, *naturalSpaceWidths, extra_width);
+        #endif
         if ( optimalSpacingRequested ) {
             // Never replace a scored line with legacy unbounded/equal spacing.
             if ( !applyOptimalWordSpacing(frmline, *naturalSpaceWidths, extra_width) )
@@ -5072,7 +5200,35 @@ public:
     }
 
     bool canUseOptimalLineBreaking(int start, int end, src_text_fragment_t * para,
-            bool preFormattedOnly) {
+            bool preFormattedOnly
+            #if defined(CR_KP_FORMATTER_TRACE)
+            , KPFormatterTraceReason & reason
+            #endif
+            ) {
+        #if defined(CR_KP_FORMATTER_TRACE)
+        reason = KP_TRACE_REASON_NONE;
+        if ( m_length <= 0 ) { reason = KP_TRACE_REASON_EMPTY; return false; }
+        if ( preFormattedOnly ) { reason = KP_TRACE_REASON_PREFORMATTED; return false; }
+        if ( m_has_cjk ) { reason = KP_TRACE_REASON_CJK; return false; }
+        if ( m_has_float_to_position || m_has_ongoing_float ||
+                m_initial_letter_exclusion.active ) {
+            reason = KP_TRACE_REASON_FLOAT;
+            return false;
+        }
+        if ( (para->flags & LTEXT_FLAG_NEWLINE) != LTEXT_ALIGN_WIDTH ) {
+            reason = KP_TRACE_REASON_ALIGNMENT;
+            return false;
+        }
+        if ( ((para->flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) &
+                LTEXT_FLAG_NEWLINE) == LTEXT_ALIGN_WIDTH ) {
+            reason = KP_TRACE_REASON_JUSTIFIED_FINAL;
+            return false;
+        }
+        if ( getCurrentLineWidth() != m_pbuffer->width ) {
+            reason = KP_TRACE_REASON_VARIABLE_WIDTH;
+            return false;
+        }
+        #else
         if ( m_length <= 0 || preFormattedOnly || m_has_cjk || m_has_float_to_position ||
                 m_has_ongoing_float || m_initial_letter_exclusion.active ||
                 (para->flags & LTEXT_FLAG_NEWLINE) != LTEXT_ALIGN_WIDTH ||
@@ -5081,24 +5237,41 @@ public:
                 getCurrentLineWidth() != m_pbuffer->width ) {
             return false;
         }
+        #endif
 
         bool allPreformatted = true;
         for ( int i=start; i<end; i++ ) {
             src_text_fragment_t * src = &m_pbuffer->srctext[i];
             if ( !(src->flags & LTEXT_FLAG_PREFORMATTED) )
                 allPreformatted = false;
-            if ( src->flags & (LTEXT_IS_FIRST_LINE_CLONE|LTEXT_FIT_GLYPHS) )
+            if ( src->flags & (LTEXT_IS_FIRST_LINE_CLONE|LTEXT_FIT_GLYPHS) ) {
+                #if defined(CR_KP_FORMATTER_TRACE)
+                reason = KP_TRACE_REASON_UNSUPPORTED_SOURCE;
+                #endif
                 return false;
+            }
             if ( src->flags & LTEXT_SRC_IS_OBJECT ) {
-                if ( src->o.objflags & LTEXT_OBJECT_IS_FLOAT )
+                if ( src->o.objflags & LTEXT_OBJECT_IS_FLOAT ) {
+                    #if defined(CR_KP_FORMATTER_TRACE)
+                    reason = KP_TRACE_REASON_FLOAT;
+                    #endif
                     return false;
+                }
                 if ( src->o.objflags & LTEXT_OBJECT_IS_INLINE_BOX ) {
                     ldomNode * node = (ldomNode *)src->object;
-                    if ( node && getInitialLetterInlineBoxPseudoElem(node) )
+                    if ( node && getInitialLetterInlineBoxPseudoElem(node) ) {
+                        #if defined(CR_KP_FORMATTER_TRACE)
+                        reason = KP_TRACE_REASON_UNSUPPORTED_SOURCE;
+                        #endif
                         return false;
+                    }
                 }
             }
         }
+        #if defined(CR_KP_FORMATTER_TRACE)
+        if ( allPreformatted )
+            reason = KP_TRACE_REASON_PREFORMATTED;
+        #endif
         return !allPreformatted;
     }
 
@@ -5410,20 +5583,49 @@ public:
         KPSpacingParams params;
         int lineCount = kp_break_paragraph_spacing(&items[0], (int)items.size(),
                 firstWidth, restWidth, params, &lines[0], (int)lines.size());
-        if ( lineCount <= 0 )
+        #if defined(CR_KP_FORMATTER_TRACE)
+        std::vector<KPFormatterTraceBreak> traceBreaks;
+        #endif
+        if ( lineCount <= 0 ) {
+            #if defined(CR_KP_FORMATTER_TRACE)
+            KPFormatterTraceEvent event = traceEvent(KP_TRACE_PASS);
+            event.reason = KP_TRACE_REASON_NO_SOLUTION;
+            event.first_width = firstWidth;
+            event.rest_width = restWidth;
+            event.deprecated_pass = includeDeprecatedWraps;
+            event.items = items.empty() ? NULL : &items[0];
+            event.item_count = items.size();
+            emitTrace(event);
+            #endif
             return false;
+        }
 
         breaks.clear();
         breaks.reserve(lineCount);
         int previous = -1;
         int previousItem = -1;
+        #if defined(CR_KP_FORMATTER_TRACE)
+        bool invalid = false;
+        #endif
         for ( int i=0; i<lineCount; i++ ) {
             int itemIndex = lines[i].break_item;
-            if ( itemIndex < 0 || itemIndex >= (int)items.size() )
+            if ( itemIndex < 0 || itemIndex >= (int)items.size() ) {
+                #if defined(CR_KP_FORMATTER_TRACE)
+                invalid = true;
+                break;
+                #else
                 return false;
+                #endif
+            }
             int breakPos = items[itemIndex].pos;
-            if ( breakPos <= previous || breakPos >= m_length )
+            if ( breakPos <= previous || breakPos >= m_length ) {
+                #if defined(CR_KP_FORMATTER_TRACE)
+                invalid = true;
+                break;
+                #else
                 return false;
+                #endif
+            }
             bool ragged = itemIndex >= 2 &&
                     items[itemIndex].type == KPItem::PENALTY &&
                     items[itemIndex].penalty <= -KP_INFINITY &&
@@ -5446,12 +5648,59 @@ public:
                     items[startItem].protrusion : 0;
             OptimalLineDecision decision = { breakPos, lines[i].ratio_x1000,
                     hangLeft, items[itemIndex].protrusion,
-                    !ragged || lines[i].ratio_x1000 < 0 };
+                    !ragged || lines[i].ratio_x1000 < 0
+                    #if defined(CR_KP_FORMATTER_TRACE)
+                    , ragged
+                    #endif
+            };
             breaks.push_back(decision);
+            #if defined(CR_KP_FORMATTER_TRACE)
+            int natural = 0;
+            int stretch = 0;
+            int shrink = 0;
+            int adjustable = 0;
+            for ( int j=startItem; j<itemIndex; j++ ) {
+                if ( items[j].type == KPItem::BOX || items[j].type == KPItem::GLUE )
+                    natural += items[j].width;
+                if ( items[j].type == KPItem::GLUE ) {
+                    stretch += items[j].stretch;
+                    shrink += items[j].shrink;
+                    adjustable += items[j].adjustable;
+                }
+            }
+            if ( items[itemIndex].type == KPItem::PENALTY )
+                natural += items[itemIndex].width;
+            int raggedFillStretch = ragged ? items[itemIndex-1].stretch : 0;
+            traceBreaks.push_back({ itemIndex, breakPos, lines[i].ratio_x1000,
+                    natural, stretch - raggedFillStretch, shrink, adjustable,
+                    raggedFillStretch,
+                    (i == 0 ? firstWidth : restWidth) + hangLeft +
+                        items[itemIndex].protrusion,
+                    hangLeft, items[itemIndex].protrusion,
+                    decision.adjust_spacing, ragged });
+            #endif
             previous = breakPos;
             previousItem = itemIndex;
         }
-        return !breaks.empty() && breaks.back().wrap_pos == m_length-1;
+        bool valid =
+                #if defined(CR_KP_FORMATTER_TRACE)
+                !invalid &&
+                #endif
+                !breaks.empty() && breaks.back().wrap_pos == m_length-1;
+        #if defined(CR_KP_FORMATTER_TRACE)
+        KPFormatterTraceEvent event = traceEvent(KP_TRACE_PASS);
+        event.reason = valid ? KP_TRACE_REASON_NONE : KP_TRACE_REASON_INVALID_SOLUTION;
+        event.first_width = firstWidth;
+        event.rest_width = restWidth;
+        event.deprecated_pass = includeDeprecatedWraps;
+        event.success = valid;
+        event.items = items.empty() ? NULL : &items[0];
+        event.item_count = items.size();
+        event.breaks = traceBreaks.empty() ? NULL : &traceBreaks[0];
+        event.break_count = traceBreaks.size();
+        emitTrace(event);
+        #endif
+        return valid;
     }
 
     bool findOptimalBreaks(src_text_fragment_t * para,
@@ -5472,8 +5721,16 @@ public:
         int availableWidth = getCurrentLineWidth();
         int firstWidth = availableWidth - firstIndent;
         int restWidth = availableWidth - restIndent;
-        if ( firstWidth <= 0 || restWidth <= 0 )
+        if ( firstWidth <= 0 || restWidth <= 0 ) {
+            #if defined(CR_KP_FORMATTER_TRACE)
+            KPFormatterTraceEvent event = traceEvent(KP_TRACE_SELECTION);
+            event.reason = KP_TRACE_REASON_BAD_WIDTH;
+            event.first_width = firstWidth;
+            event.rest_width = restWidth;
+            emitTrace(event);
+            #endif
             return false;
+        }
 
         clearOptimalHyphenationFlags();
         std::vector<int> hyphenWidths(m_length, 0);
@@ -5491,6 +5748,13 @@ public:
             clearOptimalHyphenationFlags();
             for ( int i=0; i<m_length; i++ )
                 m_flags[i] &= ~LCHAR_IS_ADJUSTABLE_SPACE;
+            #if defined(CR_KP_FORMATTER_TRACE)
+            KPFormatterTraceEvent event = traceEvent(KP_TRACE_SELECTION);
+            event.reason = KP_TRACE_REASON_NO_SOLUTION;
+            event.first_width = firstWidth;
+            event.rest_width = restWidth;
+            emitTrace(event);
+            #endif
             return false;
         }
 
@@ -5505,6 +5769,25 @@ public:
                 it!=chosenHyphens.end(); ++it ) {
             m_flags[*it] |= LCHAR_ALLOW_HYPH_WRAP_AFTER;
         }
+        #if defined(CR_KP_FORMATTER_TRACE)
+        std::vector<KPFormatterTraceBreak> selected;
+        selected.reserve(breaks.size());
+        for ( int i=0; i<(int)breaks.size(); i++ ) {
+            const OptimalLineDecision & decision = breaks[i];
+            selected.push_back({ -1, decision.wrap_pos, decision.ratio_x1000,
+                    0, 0, 0, 0, 0, (i == 0 ? firstWidth : restWidth) +
+                        decision.hang_left + decision.hang_right,
+                    decision.hang_left, decision.hang_right,
+                    decision.adjust_spacing, decision.ragged });
+        }
+        KPFormatterTraceEvent event = traceEvent(KP_TRACE_SELECTION);
+        event.success = true;
+        event.first_width = firstWidth;
+        event.rest_width = restWidth;
+        event.breaks = selected.empty() ? NULL : &selected[0];
+        event.break_count = selected.size();
+        emitTrace(event);
+        #endif
         return true;
     }
 
@@ -5568,6 +5851,11 @@ public:
         // measure paragraph text
         measureText();
 
+        #if defined(CR_KP_FORMATTER_TRACE)
+        m_trace_paragraph_start = start;
+        m_trace_paragraph_end = end;
+        #endif
+
         // We keep as 'para' the first source text, as it carries
         // the text alignment to use with all added lines.
         src_text_fragment_t * para = &m_pbuffer->srctext[start];
@@ -5592,9 +5880,23 @@ public:
         }
 
         std::vector<OptimalLineDecision> optimalBreaks;
+        #if defined(CR_KP_FORMATTER_TRACE)
+        KPFormatterTraceReason eligibilityReason = m_pbuffer->optimal_line_breaking ?
+                KP_TRACE_REASON_NONE : KP_TRACE_REASON_DISABLED;
+        bool eligible = m_pbuffer->optimal_line_breaking &&
+                canUseOptimalLineBreaking(start, end, para, preFormattedOnly,
+                                          eligibilityReason);
+        KPFormatterTraceEvent eligibility = traceEvent(KP_TRACE_ELIGIBILITY);
+        eligibility.reason = eligibilityReason;
+        eligibility.enabled = m_pbuffer->optimal_line_breaking;
+        eligibility.eligible = eligible;
+        emitTrace(eligibility);
+        if ( eligible && findOptimalBreaks(para, optimalBreaks) ) {
+        #else
         if ( m_pbuffer->optimal_line_breaking &&
                 canUseOptimalLineBreaking(start, end, para, preFormattedOnly) &&
                 findOptimalBreaks(para, optimalBreaks) ) {
+        #endif
             addOptimalLines(optimalBreaks, para, preFormattedOnly, isLastPara);
             return;
         }

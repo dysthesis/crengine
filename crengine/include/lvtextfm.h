@@ -22,6 +22,83 @@
 #include "lvbmpbuf.h"
 #include "textlang.h"
 
+#if defined(CR_KP_FORMATTER_TRACE) && defined(__cplusplus)
+#include "lvkplinebreak.h"
+
+enum KPFormatterTraceEventKind {
+    KP_TRACE_ELIGIBILITY,
+    KP_TRACE_PASS,
+    KP_TRACE_SELECTION,
+    KP_TRACE_ALLOCATION
+};
+
+enum KPFormatterTraceReason {
+    KP_TRACE_REASON_NONE,
+    KP_TRACE_REASON_DISABLED,
+    KP_TRACE_REASON_EMPTY,
+    KP_TRACE_REASON_PREFORMATTED,
+    KP_TRACE_REASON_CJK,
+    KP_TRACE_REASON_FLOAT,
+    KP_TRACE_REASON_ALIGNMENT,
+    KP_TRACE_REASON_JUSTIFIED_FINAL,
+    KP_TRACE_REASON_VARIABLE_WIDTH,
+    KP_TRACE_REASON_UNSUPPORTED_SOURCE,
+    KP_TRACE_REASON_BAD_WIDTH,
+    KP_TRACE_REASON_NO_SOLUTION,
+    KP_TRACE_REASON_INVALID_SOLUTION,
+    KP_TRACE_REASON_SPACE_COUNT,
+    KP_TRACE_REASON_NO_ADJUSTABLE_SPACE,
+    KP_TRACE_REASON_INSUFFICIENT_CAPACITY,
+    KP_TRACE_REASON_APPORTIONMENT
+};
+
+struct KPFormatterTraceBreak {
+    int item_index;
+    int source_pos;
+    int ratio_x1000;
+    int natural_width;
+    int stretch;
+    int shrink;
+    int adjustable;
+    int ragged_fill_stretch;
+    int target_width;
+    int hang_left;
+    int hang_right;
+    bool scored;
+    bool ragged;
+};
+
+struct KPFormatterTraceEvent {
+    KPFormatterTraceEventKind kind;
+    KPFormatterTraceReason reason;
+    int paragraph_start;
+    int paragraph_end;
+    int first_width;
+    int rest_width;
+    bool enabled;
+    bool eligible;
+    bool deprecated_pass;
+    bool success;
+    const KPItem * items;
+    int item_count;
+    const KPFormatterTraceBreak * breaks;
+    int break_count;
+    int line_index;
+    int requested_adjustment;
+    int applied_adjustment;
+    int final_residual;
+    const int * natural_spaces;
+    const int * capacities;
+    const int * adjustments;
+    const int * word_x;
+    const int * word_widths;
+    int space_count;
+};
+
+typedef void (*KPFormatterTraceCallback)(const KPFormatterTraceEvent *, void *);
+// All event pointers are borrowed and valid only for the callback invocation.
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -335,6 +412,11 @@ typedef struct
    // (e.g. when full rerendering). This will make is_reusable=true too.
    bool                  light_formatting;
 
+#if defined(CR_KP_FORMATTER_TRACE) && defined(__cplusplus)
+   KPFormatterTraceCallback kp_trace_callback;
+   void *                   kp_trace_userdata;
+#endif
+
 } formatted_text_fragment_t;
 
 /**  Alloc & init formatted text buffer
@@ -421,6 +503,13 @@ public:
     /// enable optimal paragraph line breaking
     void setOptimalLineBreaking(bool enabled);
 
+#if defined(CR_KP_FORMATTER_TRACE)
+    void setKPFormatterTrace(KPFormatterTraceCallback callback, void * userdata) {
+        m_pbuffer->kp_trace_callback = callback;
+        m_pbuffer->kp_trace_userdata = userdata;
+    }
+#endif
+
     /// set space glyph width scaling percent option (10..500%)
     // (scale the normal width of all spaces in all fonts by this percent)
     void setSpaceWidthScalePercent(int spaceWidthScalePercent);
@@ -445,8 +534,16 @@ public:
     void Clear()
     {
         lUInt16 width = m_pbuffer->width;
+#if defined(CR_KP_FORMATTER_TRACE)
+        KPFormatterTraceCallback callback = m_pbuffer->kp_trace_callback;
+        void * userdata = m_pbuffer->kp_trace_userdata;
+#endif
         lvtextFreeFormatter( m_pbuffer );
         m_pbuffer = lvtextAllocFormatter( width );
+#if defined(CR_KP_FORMATTER_TRACE)
+        m_pbuffer->kp_trace_callback = callback;
+        m_pbuffer->kp_trace_userdata = userdata;
+#endif
     }
 
     void AddSourceObject(
